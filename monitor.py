@@ -108,6 +108,8 @@ def job():
     
     price_yesterday = get_val(yesterday, 'Close')
     upper_line_yesterday = get_val(yesterday, 'Upper_Buffer')
+    lower_line_yesterday = get_val(yesterday, 'Lower_Buffer')
+    ema_yesterday = get_val(yesterday, 'EMA200')
 
     # 5. 构建邮件内容
     base_msg = (
@@ -134,12 +136,16 @@ def job():
     # 逻辑 A: 向上突破
     if price_yesterday < upper_line_yesterday and price_now > upper_line_now:
         subject = "🚀 警报：纳指突破 EMA200+3% 缓冲线！"
-        status_msg = "【警报触发】价格刚刚站上强趋势线，可能开启加速上涨。"
+        status_msg = "【警报触发】价格刚刚站上强趋势线，可能开启加速上涨。进入大涨行情，请重仓尽快入场！"
+
+    elif price_yesterday < ema_yesterday and price_now > ema_now:
+        subject = "📈 提示：纳指涨回 EMA200 上方"
+        status_msg = "【警报触发】价格重新回到EMA200线，请注意观察，可能进入上涨行情，开始入场。"
 
     # 逻辑 B: 向下跌破
-    elif price_yesterday > upper_line_yesterday and price_now < upper_line_now:
-        subject = "📉 提示：纳指跌回 EMA200+3% 下方"
-        status_msg = "【提示触发】价格回调跌破缓冲线，请注意观察。"
+    elif price_yesterday > lower_line_yesterday and price_now < lower_line_now:
+        subject = "📉 提示：纳指跌入 EMA200-3% 下方"
+        status_msg = "【提示触发】价格回调跌破缓冲线，请注意观察，清仓离场！"
     
     # 逻辑 C: 无事发生
     else:
