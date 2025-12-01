@@ -7,34 +7,35 @@ import os
 from datetime import datetime
 
 # --- 配置区域 ---
-# 修改为纳斯达克综合指数 (Nasdaq Composite)
+# 监控纳斯达克综合指数
 SYMBOL = "^IXIC" 
 BUFFER_PERCENT = 0.03 
 
-# --- 邮件发送函数 ---
+# --- 邮件发送函数 (163邮箱 SSL 版) ---
 def send_email(subject, content):
     try:
         sender = os.environ["MAIL_USERNAME"]
-        password = os.environ["MAIL_PASSWORD"]
+        password = os.environ["MAIL_PASSWORD"]  # 注意：这里必须填163的授权码，不是登录密码
         receiver = os.environ["MAIL_RECEIVER"]
         
-        # 默认使用 Gmail。如果是 QQ 邮箱请改为 smtp.qq.com
-        smtp_server = "smtp.gmail.com"
-        smtp_port = 587
+        # === 关键修改：改为网易 163 配置 ===
+        smtp_server = "smtp.163.com"
+        smtp_port = 465  # 网易推荐使用 SSL 端口
         
         message = MIMEText(content, 'plain', 'utf-8')
         message['From'] = Header("纳指监控机器人", 'utf-8')
         message['To'] = Header("Master", 'utf-8')
         message['Subject'] = Header(subject, 'utf-8')
     
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
+        # 使用 SMTP_SSL (网易专用连接方式)
+        server = smtplib.SMTP_SSL(smtp_server, smtp_port)
         server.login(sender, password)
         server.sendmail(sender, [receiver], message.as_string())
         server.quit()
-        print("邮件发送成功！")
+        print("✅ 邮件发送成功！")
     except Exception as e:
-        print(f"邮件发送失败: {e}")
+        print(f"❌ 邮件发送失败: {e}")
+        print("请检查：1. Secrets里的密码是否为'授权码'？ 2. 163邮箱是否开启了SMTP服务？")
 
 # --- 辅助函数：安全获取数值 ---
 def get_val(row, col_name):
@@ -71,7 +72,7 @@ def job():
     price_yesterday = get_val(yesterday, 'Close')
     upper_line_yesterday = get_val(yesterday, 'Upper_Buffer')
 
-    # --- 1. 构建基础邮件内容 (无论发什么邮件，这部分都有) ---
+    # --- 1. 构建基础邮件内容 ---
     base_msg = (
         f"开始获取 {SYMBOL} 数据...\n"
         f"日期: {today.name.date()}\n"
@@ -96,15 +97,13 @@ def job():
         subject = "📉 提示：纳指跌回 EMA200+3% 下方"
         status_msg = "【提示触发】价格回调跌破缓冲线，请注意观察。"
     
-    # 逻辑 C: 无事发生 (这就是你要的日常状态)
+    # 逻辑 C: 无事发生
     else:
         subject = "今日无突破，未触发警报。"
         status_msg = "今日无特殊信号，市场运行在现有趋势中。"
 
     # --- 3. 组合并发送邮件 ---
     final_content = base_msg + status_msg
-    
-    # 打印到控制台方便查看日志
     print(final_content)
     
     # 发送邮件 (强制发送)
