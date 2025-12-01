@@ -1,41 +1,58 @@
 import yfinance as yf
 import pandas as pd
 import smtplib
-from email.mime.text import MIMEText
-from email.header import Header
 import os
 from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+from email.header import Header
 
 # --- 配置区域 ---
-# 监控纳斯达克综合指数
-SYMBOL = "^IXIC" 
+SYMBOL = "^IXIC"    # 纳斯达克综合指数
 BUFFER_PERCENT = 0.03 
+CSV_FILENAME = "nasdaq_daily_data.csv"
 
-# --- 邮件发送函数 (163邮箱 SSL 版) ---
-def send_email(subject, content):
+# --- 邮件发送函数 (带附件版) ---
+def send_email_with_attachment(subject, content, attachment_path):
     try:
         sender = os.environ["MAIL_USERNAME"]
-        password = os.environ["MAIL_PASSWORD"]  # 注意：这里必须填163的授权码，不是登录密码
+        password = os.environ["MAIL_PASSWORD"]
         receiver = os.environ["MAIL_RECEIVER"]
         
-        # === 关键修改：改为网易 163 配置 ===
+        # 网易 163 配置
         smtp_server = "smtp.163.com"
-        smtp_port = 465  # 网易推荐使用 SSL 端口
+        smtp_port = 465
         
-        message = MIMEText(content, 'plain', 'utf-8')
-        message['From'] = Header("纳指监控机器人", 'utf-8')
-        message['To'] = Header("Master", 'utf-8')
-        message['Subject'] = Header(subject, 'utf-8')
-    
-        # 使用 SMTP_SSL (网易专用连接方式)
+        # 创建由多部分组成的邮件对象
+        msg = MIMEMultipart()
+        msg['From'] = Header("纳指监控机器人", 'utf-8')
+        msg['To'] = Header("Master", 'utf-8')
+        msg['Subject'] = Header(subject, 'utf-8')
+        
+        # 1. 添加正文文本
+        msg.attach(MIMEText(content, 'plain', 'utf-8'))
+        
+        # 2. 添加 CSV 附件
+        if os.path.exists(attachment_path):
+            with open(attachment_path, 'rb') as f:
+                part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
+                # 设置附件头信息
+                part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
+                msg.attach(part)
+                print(f"📎 已添加附件: {attachment_path}")
+        else:
+            print("⚠️ 未找到附件文件，将只发送文本。")
+
+        # 发送
         server = smtplib.SMTP_SSL(smtp_server, smtp_port)
         server.login(sender, password)
-        server.sendmail(sender, [receiver], message.as_string())
+        server.sendmail(sender, [receiver], msg.as_string())
         server.quit()
-        print("✅ 邮件发送成功！")
+        print("✅ 邮件(含附件)发送成功！")
+        
     except Exception as e:
         print(f"❌ 邮件发送失败: {e}")
-        print("请检查：1. Secrets里的密码是否为'授权码'？ 2. 163邮箱是否开启了SMTP服务？")
 
 # --- 辅助函数：安全获取数值 ---
 def get_val(row, col_name):
@@ -46,44 +63,71 @@ def get_val(row, col_name):
 
 # --- 主逻辑 ---
 def job():
-    print(f"开始获取 {SYMBOL} 数据...")
-    # 获取数据
-    df = yf.download(SYMBOL, period="2y", interval="1d", progress=False, auto_adjust=True)
+    print(f"开始获取 {SYMBOL} 全部历史数据 (Max)...")
+    
+    # 1. 获取数据 (使用 max 确保 EMA 精度与 TradingView 一致)
+    df = yf.download(SYMBOL, period="max", interval="1d", progress=False, auto_adjust=True)
     
     if len(df) < 200:
         print("数据不足，无法计算")
         return
 
-    # 计算指标
+    # 2. 计算各项指标
+    # EMA200 (指数移动平均)
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+    # EMA200 上下缓冲带
     df['Upper_Buffer'] = df['EMA200'] * (1 + BUFFER_PERCENT)
     df['Lower_Buffer'] = df['EMA200'] * (1 - BUFFER_PERCENT)
+    
+    # SMA200 (简单移动平均 - 长期趋势参考)
+    df['SMA200'] = df['Close'].rolling(window=200).mean()
+    # SMA40 (简单移动平均 - 也就是周线级别的 MA40/日线MA200的变体)
+    df['SMA40'] = df['Close'].rolling(window=40).mean()
 
-    # 获取今日与昨日数据
+    # 3. 准备 CSV 文件
+    print("正在生成 CSV 文件...")
+    # 我们只保留最近 5 年的数据写入 CSV，避免文件太大，方便查看
+    # 如果你想保存全部，去掉 .tail(1260) 即可
+    output_df = df[['Close', 'EMA200', 'Upper_Buffer', 'Lower_Buffer', 'SMA200', 'SMA40']].tail(1260).copy()
+    
+    # 格式化一下数字，保留2位小数
+    output_df = output_df.round(2)
+    # 导出到 CSV
+    output_df.to_csv(CSV_FILENAME, encoding='utf-8-sig') # utf-8-sig 防止 Excel 打开乱码
+
+    # 4. 获取今日与昨日数据用于判断逻辑
     today = df.iloc[-1]
     yesterday = df.iloc[-2]
     
-    # 提取数值
     price_now = get_val(today, 'Close')
     upper_line_now = get_val(today, 'Upper_Buffer')
     lower_line_now = get_val(today, 'Lower_Buffer')
     ema_now = get_val(today, 'EMA200')
+    sma200_now = get_val(today, 'SMA200')
+    sma40_now = get_val(today, 'SMA40')
     
     price_yesterday = get_val(yesterday, 'Close')
     upper_line_yesterday = get_val(yesterday, 'Upper_Buffer')
 
-    # --- 1. 构建基础邮件内容 ---
+    # 5. 构建邮件内容
     base_msg = (
-        f"开始获取 {SYMBOL} 数据...\n"
+        f"数据来源: {SYMBOL} (全量历史数据)\n"
         f"日期: {today.name.date()}\n"
         f"收盘价: {price_now:.2f}\n"
+        f"------------------------------\n"
+        f"【核心参考】\n"
         f"EMA200: {ema_now:.2f}\n"
         f"上轨 (+3%): {upper_line_now:.2f}\n"
         f"下轨 (-3%): {lower_line_now:.2f}\n"
         f"------------------------------\n"
+        f"【辅助参考】\n"
+        f"SMA200: {sma200_now:.2f}\n"
+        f"SMA40:  {sma40_now:.2f}\n"
+        f"------------------------------\n"
+        f"详细数据请查看附件 CSV。\n"
     )
 
-    # --- 2. 判断逻辑 & 确定标题 ---
+    # 6. 判断逻辑 & 确定标题
     subject = ""
     status_msg = ""
 
@@ -99,15 +143,14 @@ def job():
     
     # 逻辑 C: 无事发生
     else:
-        subject = "今日无突破，未触发警报。"
+        subject = f"日报: {today.name.date()} 无突破信号"
         status_msg = "今日无特殊信号，市场运行在现有趋势中。"
 
-    # --- 3. 组合并发送邮件 ---
+    # 7. 发送邮件
     final_content = base_msg + status_msg
     print(final_content)
     
-    # 发送邮件 (强制发送)
-    send_email(subject, final_content)
+    send_email_with_attachment(subject, final_content, CSV_FILENAME)
 
 if __name__ == "__main__":
     job()
