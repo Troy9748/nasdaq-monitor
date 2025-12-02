@@ -1,4 +1,4 @@
-name: Daily Nasdaq Check
+name: Daily Market Check
 
 on:
   schedule:
@@ -10,7 +10,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     
-    # 这一步是为了给 git 提交赋予权限
     permissions:
       contents: write
 
@@ -35,16 +34,14 @@ jobs:
         run: |
           python monitor.py
 
-      # --- 新增步骤：将 CSV 提交回仓库 ---
+      # --- 更新 CSV 提交逻辑 ---
       - name: Commit and Push CSV
         run: |
-          # 1. 配置 Git 机器人身份
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # 2. 添加生成的 CSV 文件
-          git add nasdaq_daily_data.csv
+          # 注意：这里改成了新的文件名 market_daily_data.csv
+          git add market_daily_data.csv
           
-          # 3. 检查是否有变化 (如果没有新数据就不提交，避免报错)
-          # 如果有变化，提交并推送
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update: Daily Nasdaq Data CSV" && git push)
+          # 检查变化并提交
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update: Market Data CSV" && git push)
