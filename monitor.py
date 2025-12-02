@@ -9,154 +9,170 @@ from email.mime.application import MIMEApplication
 from email.header import Header
 
 # --- 配置区域 ---
-SYMBOL = "^IXIC"    # 纳斯达克综合指数
-BUFFER_PERCENT = 0.03 
-CSV_FILENAME = "nasdaq_daily_data.csv"
+# 字典结构：显示名称 -> 股票代码
+TARGETS = {
+    "NASDAQ": "^IXIC",   # 纳斯达克综合指数
+    "GOLD": "GC=F"       # 黄金期货 (COMEX Gold Futures)
+}
 
-# --- 邮件发送函数 (带附件版) ---
+BUFFER_PERCENT = 0.03 
+CSV_FILENAME = "market_daily_data.csv" # 改个名字，因为现在包含多个市场数据
+
+# --- 邮件发送函数 (保持不变) ---
 def send_email_with_attachment(subject, content, attachment_path):
     try:
         sender = os.environ["MAIL_USERNAME"]
         password = os.environ["MAIL_PASSWORD"]
         receiver = os.environ["MAIL_RECEIVER"]
         
-        # 网易 163 配置
+        # 你的SMTP服务器配置 (这里以网易163为例，Gmail为 smtp.gmail.com)
         smtp_server = "smtp.163.com"
         smtp_port = 465
         
-        # 创建由多部分组成的邮件对象
         msg = MIMEMultipart()
-        msg['From'] = Header("纳指监控机器人", 'utf-8')
+        msg['From'] = Header("市场监控机器人", 'utf-8')
         msg['To'] = Header("Master", 'utf-8')
         msg['Subject'] = Header(subject, 'utf-8')
         
-        # 1. 添加正文文本
         msg.attach(MIMEText(content, 'plain', 'utf-8'))
         
-        # 2. 添加 CSV 附件
         if os.path.exists(attachment_path):
             with open(attachment_path, 'rb') as f:
                 part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
-                # 设置附件头信息
                 part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
                 msg.attach(part)
                 print(f"📎 已添加附件: {attachment_path}")
-        else:
-            print("⚠️ 未找到附件文件，将只发送文本。")
-
-        # 发送
+        
         server = smtplib.SMTP_SSL(smtp_server, smtp_port)
         server.login(sender, password)
         server.sendmail(sender, [receiver], msg.as_string())
         server.quit()
-        print("✅ 邮件(含附件)发送成功！")
+        print("✅ 邮件发送成功！")
         
     except Exception as e:
         print(f"❌ 邮件发送失败: {e}")
 
-# --- 辅助函数：安全获取数值 ---
-def get_val(row, col_name):
-    val = row[col_name]
-    if hasattr(val, 'iloc'): 
-        return float(val.iloc[0])
-    return float(val)
-
-# --- 主逻辑 ---
-def job():
-    print(f"开始获取 {SYMBOL} 全部历史数据 (Max)...")
-    
-    # 1. 获取数据 (使用 max 确保 EMA 精度与 TradingView 一致)
-    df = yf.download(SYMBOL, period="max", interval="1d", progress=False, auto_adjust=True)
-    
-    if len(df) < 200:
-        print("数据不足，无法计算")
-        return
-
-    # 2. 计算各项指标
-    # EMA200 (指数移动平均)
+# --- 辅助函数：计算指标 ---
+def calculate_indicators(df):
+    """接收原始DF，返回计算好指标的DF"""
+    df = df.copy()
+    # EMA200
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
-    # EMA200 上下缓冲带
+    # Buffers
     df['Upper_Buffer'] = df['EMA200'] * (1 + BUFFER_PERCENT)
     df['Lower_Buffer'] = df['EMA200'] * (1 - BUFFER_PERCENT)
-    
-    # SMA200 (简单移动平均 - 长期趋势参考)
+    # SMAs
     df['SMA200'] = df['Close'].rolling(window=200).mean()
-    # SMA40 (简单移动平均 - 也就是周线级别的 MA40/日线MA200的变体)
     df['SMA40'] = df['Close'].rolling(window=40).mean()
+    return df.round(2)
 
-    # 3. 准备 CSV 文件
-    print("正在生成 CSV 文件...")
-    # 我们只保留最近 5 年的数据写入 CSV，避免文件太大，方便查看
-    # 如果你想保存全部，去掉 .tail(1260) 即可
-    output_df = df[['Close', 'EMA200', 'Upper_Buffer', 'Lower_Buffer', 'SMA200', 'SMA40']].tail(1260).copy()
+# --- 辅助函数：获取单点数值 ---
+def get_val(row, col_name):
+    val = row.get(col_name) # 使用 .get 防止列不存在报错
+    if val is None: return 0.0
+    if hasattr(val, 'iloc'): return float(val.iloc[0])
+    return float(val)
+
+# --- 核心逻辑 ---
+def job():
+    print("开始获取市场数据...")
     
-    # 格式化一下数字，保留2位小数
-    output_df = output_df.round(2)
-    # 导出到 CSV
-    output_df.to_csv(CSV_FILENAME, encoding='utf-8-sig') # utf-8-sig 防止 Excel 打开乱码
+    combined_df = pd.DataFrame()
+    email_report = []
+    alert_triggered = False
+    urgent_subjects = []
 
-    # 4. 获取今日与昨日数据用于判断逻辑
-    today = df.iloc[-1]
-    yesterday = df.iloc[-2]
+    # 1. 循环处理每个标的
+    for name, symbol in TARGETS.items():
+        print(f"正在处理: {name} ({symbol})...")
+        
+        # 下载数据
+        df = yf.download(symbol, period="max", interval="1d", progress=False, auto_adjust=True)
+        
+        if len(df) < 200:
+            print(f"⚠️ {name} 数据不足，跳过")
+            continue
+
+        # 计算指标
+        df = calculate_indicators(df)
+        
+        # 重命名列，加上后缀 (例如 Close -> Close_NASDAQ) 以便合并
+        # 只保留我们需要输出的列
+        cols_to_keep = ['Close', 'EMA200', 'Upper_Buffer', 'Lower_Buffer', 'SMA200', 'SMA40']
+        df_export = df[cols_to_keep].add_suffix(f"_{name}")
+        
+        # 合并到总表 (按日期索引合并)
+        if combined_df.empty:
+            combined_df = df_export
+        else:
+            combined_df = pd.merge(combined_df, df_export, left_index=True, right_index=True, how='outer')
+
+        # --- 信号检测逻辑 ---
+        # 获取最后两行数据 (注意：合并后的DF可能有空值，这里我们用原始单标的DF做逻辑判断更准确)
+        today = df.iloc[-1]
+        yesterday = df.iloc[-2]
+        
+        p_now = get_val(today, 'Close')
+        p_prev = get_val(yesterday, 'Close')
+        upper_now = get_val(today, 'Upper_Buffer')
+        upper_prev = get_val(yesterday, 'Upper_Buffer')
+        lower_now = get_val(today, 'Lower_Buffer')
+        lower_prev = get_val(yesterday, 'Lower_Buffer')
+        ema_now = get_val(today, 'EMA200')
+        ema_prev = get_val(yesterday, 'EMA200')
+
+        # 构建该标的的报告段落
+        status_icon = "🟢"
+        status_text = "趋势维持中"
+        
+        # 逻辑 A: 向上突破 Upper Buffer
+        if p_prev < upper_prev and p_now > upper_now:
+            status_icon = "🚀"
+            status_text = "【警报】突破 EMA200+3% 强阻力！"
+            alert_triggered = True
+            urgent_subjects.append(f"{name}突破")
+            
+        # 逻辑 B: 站回 EMA200
+        elif p_prev < ema_prev and p_now > ema_now:
+            status_icon = "📈"
+            status_text = "【提示】价格收回 EMA200 上方"
+            alert_triggered = True
+            urgent_subjects.append(f"{name}转强")
+
+        # 逻辑 C: 跌破 Lower Buffer
+        elif p_prev > lower_prev and p_now < lower_now:
+            status_icon = "📉"
+            status_text = "【警报】跌破 EMA200-3% 支撑！"
+            alert_triggered = True
+            urgent_subjects.append(f"{name}破位")
+        
+        # 生成段落
+        report_section = (
+            f"{status_icon} **{name} ({symbol})**\n"
+            f"日期: {today.name.date()}\n"
+            f"收盘: {p_now:.2f} | 状态: {status_text}\n"
+            f"EMA200: {ema_now:.2f}\n"
+            f"上轨(+3%): {upper_now:.2f} | 下轨(-3%): {lower_now:.2f}\n"
+            f"------------------------------\n"
+        )
+        email_report.append(report_section)
+
+    # 2. 保存合并后的 CSV
+    print(f"正在保存合并数据到 {CSV_FILENAME}...")
+    # 截取最近5年，按日期降序排列方便查看 (可选)
+    combined_df = combined_df.tail(1260).sort_index(ascending=False)
+    combined_df.to_csv(CSV_FILENAME, encoding='utf-8-sig')
+
+    # 3. 发送邮件
+    full_content = "【每日市场扫描】\n\n" + "\n".join(email_report) + "\n详细数据请查看附件 CSV。"
     
-    price_now = get_val(today, 'Close')
-    upper_line_now = get_val(today, 'Upper_Buffer')
-    lower_line_now = get_val(today, 'Lower_Buffer')
-    ema_now = get_val(today, 'EMA200')
-    sma200_now = get_val(today, 'SMA200')
-    sma40_now = get_val(today, 'SMA40')
-    
-    price_yesterday = get_val(yesterday, 'Close')
-    upper_line_yesterday = get_val(yesterday, 'Upper_Buffer')
-    lower_line_yesterday = get_val(yesterday, 'Lower_Buffer')
-    ema_yesterday = get_val(yesterday, 'EMA200')
-
-    # 5. 构建邮件内容
-    base_msg = (
-        f"数据来源: {SYMBOL} (全量历史数据)\n"
-        f"日期: {today.name.date()}\n"
-        f"收盘价: {price_now:.2f}\n"
-        f"------------------------------\n"
-        f"【核心参考】\n"
-        f"EMA200: {ema_now:.2f}\n"
-        f"上轨 (+3%): {upper_line_now:.2f}\n"
-        f"下轨 (-3%): {lower_line_now:.2f}\n"
-        f"------------------------------\n"
-        f"【辅助参考】\n"
-        f"SMA200: {sma200_now:.2f}\n"
-        f"SMA40:  {sma40_now:.2f}\n"
-        f"------------------------------\n"
-        f"详细数据请查看附件 CSV。\n"
-    )
-
-    # 6. 判断逻辑 & 确定标题
-    subject = ""
-    status_msg = ""
-
-    # 逻辑 A: 向上突破
-    if price_yesterday < upper_line_yesterday and price_now > upper_line_now:
-        subject = "🚀 警报：纳指突破 EMA200+3% 缓冲线！"
-        status_msg = "【警报触发】价格刚刚站上强趋势线，可能开启加速上涨。进入大涨行情，请重仓尽快入场！"
-
-    elif price_yesterday < ema_yesterday and price_now > ema_now:
-        subject = "📈 提示：纳指涨回 EMA200 上方"
-        status_msg = "【警报触发】价格重新回到EMA200线，请注意观察，可能进入上涨行情，开始入场。"
-
-    # 逻辑 B: 向下跌破
-    elif price_yesterday > lower_line_yesterday and price_now < lower_line_now:
-        subject = "📉 提示：纳指跌入 EMA200-3% 下方"
-        status_msg = "【提示触发】价格回调跌破缓冲线，请注意观察，清仓离场！"
-    
-    # 逻辑 C: 无事发生
+    if alert_triggered:
+        subject = f"🔔 警报: {' & '.join(urgent_subjects)}"
     else:
-        subject = f"日报: {today.name.date()} 无突破信号"
-        status_msg = "今日无特殊信号，市场运行在现有趋势中。"
-
-    # 7. 发送邮件
-    final_content = base_msg + status_msg
-    print(final_content)
-    
-    send_email_with_attachment(subject, final_content, CSV_FILENAME)
+        subject = f"日报: {datetime.now().strftime('%Y-%m-%d')} 市场平静"
+        
+    print(full_content)
+    send_email_with_attachment(subject, full_content, CSV_FILENAME)
 
 if __name__ == "__main__":
     job()
