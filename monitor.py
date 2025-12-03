@@ -26,7 +26,7 @@ def send_email_with_attachment(subject, content, attachment_path):
         receiver = os.environ["MAIL_RECEIVER"]
         
         # 你的SMTP服务器配置 (这里以网易163为例，Gmail为 smtp.gmail.com)
-        smtp_server = "smtp.163.com"
+        smtp_server = "smtp.gmail.com"
         smtp_port = 465
         
         msg = MIMEMultipart()
