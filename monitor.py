@@ -134,26 +134,26 @@ def job():
 
         status_icon = "🟢"
         status_text = "趋势维持中"
-        
+
         # --- 信号检测逻辑 ---
         # 逻辑 A: 向上突破 Upper Buffer
         if p_prev < upper_prev and p_now > upper_now:
             status_icon = "🚀"
-            status_text = "【警报】突破 EMA200+3% 强阻力！"
+            status_text = "【警报】突破 EMA200+3% 强阻力！可能开启加速上涨。进入大涨行情，请重仓尽快入场！"
             alert_triggered = True
             urgent_subjects.append(f"{name}突破")
             
         # 逻辑 B: 站回 EMA200
         elif p_prev < ema_prev and p_now > ema_now:
             status_icon = "📈"
-            status_text = "【提示】价格收回 EMA200 上方"
+            status_text = "【提示】价格收回 EMA200 上方，请注意观察，可能进入上涨行情，开始入场。"
             alert_triggered = True
             urgent_subjects.append(f"{name}转强")
 
         # 逻辑 C: 跌破 Lower Buffer
         elif p_prev > lower_prev and p_now < lower_now:
             status_icon = "📉"
-            status_text = "【警报】跌破 EMA200-3% 支撑！"
+            status_text = "【警报】跌破 EMA200-3% 支撑！请注意观察，清仓离场！"
             alert_triggered = True
             urgent_subjects.append(f"{name}破位")
         
