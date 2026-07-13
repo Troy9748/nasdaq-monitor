@@ -60,3 +60,7 @@ jobs:
           git add nasdaq100_daily_data.csv market_context_daily.csv web/public/data/
           git diff --cached --quiet || git commit -m "Auto-update: NASDAQ-100 market data"
           git push
+
+  dashboard:
+    needs: monitor
+    uses: ./.github/workflows/dashboard_check.yml
