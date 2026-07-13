@@ -11,7 +11,7 @@
 5. 计算趋势、动量、波动、回撤和当前成分股站上 EMA200 的比例。
 6. DeepSeek/OpenAI 只基于提供的数据生成条件化风险框架，失败时退回规则分析。
 7. 新交易日发送邮件并提交 CSV、网页 JSON 和分析结果；节假日不会重复发送。
-8. 网页数据提交后由 GitHub Pages 工作流自动构建并发布，不依赖本地电脑在线。
+8. 网页数据提交后由 GitHub 执行完整构建检查，本地 Codex 自动任务在 07:20 发布新版公开 Sites 页面。
 
 ## GitHub Secrets
 
@@ -64,7 +64,7 @@ pnpm dev
 - FRED 对 Yahoo 临时收盘的周度校准差异审计；
 - 日常、注意、重要和故障四级提醒，以及最近状态切换事件。
 
-公开网页：`https://troy9748.github.io/nasdaq-monitor/`。首次启用时需要在仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**；之后每次 `web/` 数据或代码提交都会自动发布。
+公开网页：`https://ndx-signal-desk.lxh9748.chatgpt.site`。自动发布任务需要本机和 Codex 可运行；GitHub 上的数据更新与构建检查不依赖本机。
 
 ## 数据口径
 
