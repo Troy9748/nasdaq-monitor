@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pages: write
+      id-token: write
     defaults:
       run:
         working-directory: web
@@ -38,6 +40,8 @@ jobs:
       - run: pnpm run test:pages
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
