@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
-from monitor import calculate_indicators, classify_signal, merge_recent_history
+from monitor import build_ai_request, calculate_indicators, classify_signal, merge_recent_history
 
 
 class MonitorTest(unittest.TestCase):
@@ -38,6 +39,19 @@ class MonitorTest(unittest.TestCase):
 
         self.assertEqual(merged.loc["2026-07-10", "Close"], 101.0)
         self.assertEqual(merged.loc["2026-07-13", "Close"], 102.0)
+
+    @patch.dict(
+        "os.environ",
+        {"OPENAI_BASE_URL": "https://api.deepseek.com", "OPENAI_MODEL": "deepseek-v4-flash"},
+    )
+    def test_deepseek_uses_chat_completions(self):
+        url, payload, model, provider = build_ai_request({"close": 123})
+
+        self.assertEqual(url, "https://api.deepseek.com/chat/completions")
+        self.assertEqual(model, "deepseek-v4-flash")
+        self.assertEqual(provider, "DeepSeek")
+        self.assertEqual(payload["messages"][1]["role"], "user")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
 
 
 if __name__ == "__main__":

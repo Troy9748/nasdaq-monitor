@@ -199,25 +199,39 @@ def deterministic_analysis(snapshot: dict) -> str:
     )
 
 
+def build_ai_request(snapshot: dict) -> tuple[str, dict, str, str]:
+    base_url = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL") or "gpt-5.4-mini"
+    provider = "DeepSeek" if "api.deepseek.com" in base_url else "OpenAI"
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是一名审慎的市场数据分析员。只能使用用户提供的 NASDAQ-100 指标，不得虚构新闻、宏观事件或实时信息。"
+                    "用中文输出四个短段落：市场状态、动量与趋势、主要风险、下一交易日观察点。"
+                    "区分事实与推断，不给出买入、卖出、重仓或清仓指令，结尾注明不构成投资建议。"
+                ),
+            },
+            {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
+        ],
+        "max_tokens": 700,
+        "stream": False,
+    }
+    if provider == "DeepSeek":
+        payload["thinking"] = {"type": "disabled"}
+    return f"{base_url}/chat/completions", payload, model, provider
+
+
 def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return deterministic_analysis(snapshot), "规则分析", None
 
-    model = os.getenv("OPENAI_MODEL") or "gpt-5.4-mini"
-    payload = {
-        "model": model,
-        "reasoning": {"effort": "low"},
-        "instructions": (
-            "你是一名审慎的市场数据分析员。只能使用用户提供的 NASDAQ-100 指标，不得虚构新闻、宏观事件或实时信息。"
-            "用中文输出四个短段落：市场状态、动量与趋势、主要风险、下一交易日观察点。"
-            "区分事实与推断，不给出买入、卖出、重仓或清仓指令，结尾注明不构成投资建议。"
-        ),
-        "input": json.dumps(snapshot, ensure_ascii=False),
-        "max_output_tokens": 700,
-    }
+    url, payload, model, provider = build_ai_request(snapshot)
     request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
+        url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
@@ -225,16 +239,10 @@ def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             result = json.load(response)
-        text = "\n".join(
-            content["text"]
-            for item in result.get("output", [])
-            if item.get("type") == "message"
-            for content in item.get("content", [])
-            if content.get("type") == "output_text" and content.get("text")
-        ).strip()
+        text = result["choices"][0]["message"]["content"].strip()
         if not text:
-            raise RuntimeError("OpenAI 响应中没有文本内容")
-        return text, "OpenAI", model
+            raise RuntimeError(f"{provider} 响应中没有文本内容")
+        return text, provider, model
     except (OSError, urllib.error.HTTPError, ValueError, KeyError, RuntimeError) as error:
         print(f"⚠️ AI 分析不可用，改用规则分析: {error}")
         return deterministic_analysis(snapshot), "规则分析（AI 回退）", model

@@ -8,7 +8,7 @@
 2. 校验日期、价格、样本数与重复行。
 3. 只有行情日期较 CSV 更新时才继续，节假日不会重复发送。
 4. 计算 EMA20/50/200、SMA200、RSI14、20 日年化波动率、52 周高点距离和历史高点回撤。
-5. 如已配置 OpenAI，则生成受指标约束的中文分析；失败时自动退回规则分析。
+5. 如已配置 OpenAI 兼容 API，则生成受指标约束的中文分析；失败时自动退回规则分析。
 6. 发送邮件并提交 CSV、网页 JSON 和分析结果。
 
 ## GitHub Secrets
@@ -16,17 +16,18 @@
 - `MAIL_USERNAME`：Gmail 发件地址
 - `MAIL_PASSWORD`：Gmail 应用专用密码
 - `MAIL_RECEIVER`：收件地址
-- `OPENAI_API_KEY`：可选；不配置时使用规则分析
+- `OPENAI_API_KEY`：可选；OpenAI 或 DeepSeek API key，不配置时使用规则分析
 
-可选仓库变量 `OPENAI_MODEL` 用于覆盖默认模型 `gpt-5.4-mini`。
+仓库变量 `OPENAI_MODEL` 用于覆盖默认模型 `gpt-5.4-mini`；使用兼容服务时再设置 `OPENAI_BASE_URL`。
 
 设置 `OPENAI_API_KEY`：
 
-1. 在 OpenAI Platform 的 API Keys 页面创建 Secret key，并立即复制保存。
+1. 在 OpenAI 或 DeepSeek 控制台创建 API key，并立即复制保存。
 2. 打开本仓库的 **Settings → Secrets and variables → Actions → New repository secret**。
 3. Name 填 `OPENAI_API_KEY`，Secret 粘贴 API key，点击 **Add secret**。
-4. 可在 **Variables** 中新增 `OPENAI_MODEL`；不设置则使用默认模型。
-5. 到 **Actions → Daily NASDAQ-100 Check → Run workflow** 手动验证一次。不要把 key 写进代码、CSV 或网页。
+4. 在 **Variables** 中新增 `OPENAI_MODEL`；DeepSeek 填 `deepseek-v4-flash`。
+5. 使用 DeepSeek 时再新增变量 `OPENAI_BASE_URL`，值为 `https://api.deepseek.com`。
+6. 到 **Actions → Daily NASDAQ-100 Check → Run workflow** 手动验证一次。不要把 key 写进代码、CSV 或网页。
 
 ## 本地运行
 
