@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* Vinext/Sites production configuration lives in vite.config.ts. */
+  ...(process.env.GITHUB_PAGES === "true"
+    ? { output: "export", basePath: "/nasdaq-monitor" }
+    : {}),
 };
 
 export default nextConfig;
