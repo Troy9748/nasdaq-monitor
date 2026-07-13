@@ -10,6 +10,8 @@ type Point = {
   rsi14: number | null;
   volatility20_pct: number | null;
   drawdown_pct: number | null;
+  source: string;
+  is_provisional: boolean;
 };
 
 type Summary = {
@@ -27,6 +29,18 @@ type Summary = {
   max_drawdown_pct: number;
   status: string;
   status_detail: string;
+  freshness: { status: string; age_days: number; latest_market_date: string; checked_at: string };
+  provenance: {
+    latest_source: string;
+    latest_is_provisional: boolean;
+    authoritative_through: string;
+    provisional_rows: number;
+  };
+  context: {
+    vxn: { value: number; as_of: string; source: string } | null;
+    treasury10y: { value: number; as_of: string; source: string } | null;
+    breadth: { above_ema200_pct: number; above_ema200_count: number | null; sample_size: number | null; as_of: string; source: string } | null;
+  };
 };
 
 type MarketData = {
@@ -173,6 +187,79 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
   );
 }
 
+function IndicatorChart({
+  points,
+  field,
+  color,
+  reference,
+}: {
+  points: Point[];
+  field: "drawdown_pct" | "rsi14" | "volatility20_pct";
+  color: string;
+  reference?: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const draw = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(bounds.width * ratio));
+      canvas.height = Math.max(1, Math.floor(bounds.height * ratio));
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+      const values = points.map((point) => point[field]).filter((value): value is number => value != null);
+      if (values.length < 2) return;
+      const min = Math.min(...values, reference ?? Infinity);
+      const max = Math.max(...values, reference ?? -Infinity);
+      const spread = max - min || 1;
+      const x = (index: number) => (index / Math.max(1, points.length - 1)) * bounds.width;
+      const y = (value: number) => 8 + (bounds.height - 16) * (1 - (value - min) / spread);
+      if (reference != null) {
+        context.setLineDash([4, 4]);
+        context.strokeStyle = "rgba(148,163,184,.28)";
+        context.beginPath();
+        context.moveTo(0, y(reference));
+        context.lineTo(bounds.width, y(reference));
+        context.stroke();
+        context.setLineDash([]);
+      }
+      context.strokeStyle = color;
+      context.lineWidth = 1.6;
+      context.beginPath();
+      let started = false;
+      points.forEach((point, index) => {
+        const value = point[field];
+        if (value == null) return;
+        if (!started) context.moveTo(x(index), y(value));
+        else context.lineTo(x(index), y(value));
+        started = true;
+      });
+      context.stroke();
+    };
+    draw();
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [points, field, color, reference]);
+  return <canvas className="indicator-canvas" ref={canvasRef} aria-label={`${field}历史走势图`} />;
+}
+
+function RegimeTimeline({ points }: { points: Point[] }) {
+  const sampled = points.filter((_, index) => index % Math.max(1, Math.floor(points.length / 180)) === 0);
+  return (
+    <div className="regime-timeline" aria-label="市场状态时间轴">
+      {sampled.map((point) => {
+        const state = point.ema200 == null ? "unknown" : point.close < point.ema200 ? "defensive" : point.ema50 != null && point.ema50 > point.ema200 ? "trend" : "repair";
+        return <span key={point.date} className={state} title={`${point.date} · ${state}`} />;
+      })}
+    </div>
+  );
+}
+
 export default function Home() {
   const [market, setMarket] = useState<MarketData | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -222,7 +309,7 @@ export default function Home() {
     <main>
       <header className="topbar">
         <div className="brand"><span className="brand-mark">N</span><div><strong>NDX SIGNAL DESK</strong><small>NASDAQ-100 MARKET INTELLIGENCE</small></div></div>
-        <div className="market-stamp"><span className="live-dot" />数据截至 {summary.market_date}<span>·</span>收盘后日线</div>
+        <div className="market-stamp"><span className={`live-dot ${summary.freshness.status !== "正常" ? "warn" : ""}`} />数据截至 {summary.market_date}<span>·</span>{summary.freshness.status}</div>
         <a className="download" href="/data/nasdaq100_daily_data.csv" download>下载完整 CSV</a>
       </header>
 
@@ -247,6 +334,13 @@ export default function Home() {
           <article className="metric panel"><span>当前回撤</span><strong className={tone(summary.drawdown_pct)}>{signed(summary.drawdown_pct)}</strong><small>历史最大 {signed(summary.max_drawdown_pct)}</small></article>
         </section>
 
+        <section className="context-strip panel">
+          <div><span>数据口径</span><strong>{summary.provenance.latest_source}{summary.provenance.latest_is_provisional ? " · 临时" : " · 权威"}</strong><small>FRED 校准至 {summary.provenance.authoritative_through}</small></div>
+          <div><span>VXN</span><strong>{number(summary.context.vxn?.value)}</strong><small>{summary.context.vxn?.as_of ?? "暂无数据"} · {summary.context.vxn?.source ?? "—"}</small></div>
+          <div><span>10年期美债</span><strong>{summary.context.treasury10y ? `${number(summary.context.treasury10y.value)}%` : "—"}</strong><small>{summary.context.treasury10y?.as_of ?? "暂无数据"} · {summary.context.treasury10y?.source ?? "—"}</small></div>
+          <div><span>成分股站上 EMA200</span><strong>{summary.context.breadth ? `${number(summary.context.breadth.above_ema200_pct)}%` : "待首次成功计算"}</strong><small>{summary.context.breadth ? `${summary.context.breadth.above_ema200_count == null ? summary.context.breadth.source : `${summary.context.breadth.above_ema200_count}/${summary.context.breadth.sample_size}`} · ${summary.context.breadth.as_of}` : "Nasdaq 名单 + Yahoo 日线"}</small></div>
+        </section>
+
         <section className="chart-panel panel">
           <div className="section-head">
             <div><span className="eyebrow">PRICE STRUCTURE</span><h2>长期趋势与均线结构</h2></div>
@@ -259,6 +353,17 @@ export default function Home() {
           </div>
           <div className="legend"><span><i className="close-line" />收盘</span><span><i className="ema50-line" />EMA50</span><span><i className="ema200-line" />EMA200</span></div>
           <PriceChart points={visiblePoints} logScale={logScale} />
+          <div className="timeline-label"><span>防御</span><span>修复</span><span>多头</span></div>
+          <RegimeTimeline points={visiblePoints} />
+        </section>
+
+        <section className="risk-panel panel">
+          <div className="section-head"><div><span className="eyebrow">RISK DIAGNOSTICS</span><h2>回撤、动量与波动结构</h2></div></div>
+          <div className="risk-grid">
+            <article><div><span>历史回撤</span><strong className="negative">{signed(summary.drawdown_pct)}</strong></div><IndicatorChart points={visiblePoints} field="drawdown_pct" color="#fb7185" reference={0} /></article>
+            <article><div><span>RSI 14</span><strong>{number(summary.rsi14)}</strong></div><IndicatorChart points={visiblePoints} field="rsi14" color="#a78bfa" reference={50} /></article>
+            <article><div><span>20日年化波动</span><strong>{number(summary.volatility20_pct)}%</strong></div><IndicatorChart points={visiblePoints} field="volatility20_pct" color="#f59e0b" /></article>
+          </div>
         </section>
 
         <section className="returns panel">
@@ -290,7 +395,7 @@ export default function Home() {
           <div className="method-grid">
             <p><strong>趋势</strong><span>收盘价、EMA50 与 EMA200 的相对位置定义市场状态，不预测拐点。</span></p>
             <p><strong>风险</strong><span>20 日年化波动、历史高点回撤和 52 周价格位置共同描述风险环境。</span></p>
-            <p><strong>AI 边界</strong><span>只解释表内指标，不抓取新闻、不虚构事件、不输出交易指令。</span></p>
+            <p><strong>AI 边界</strong><span>只解释已提供的价格、风险与市场环境指标，不抓取新闻，不输出绝对交易指令。</span></p>
           </div>
         </section>
       </div>

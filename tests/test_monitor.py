@@ -3,7 +3,15 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from monitor import build_ai_request, calculate_indicators, classify_signal, merge_recent_history
+from monitor import (
+    NEW_YORK,
+    build_ai_request,
+    calculate_indicators,
+    classify_signal,
+    download_history,
+    job,
+    merge_recent_history,
+)
 
 
 class MonitorTest(unittest.TestCase):
@@ -53,6 +61,56 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["role"], "user")
         self.assertEqual(payload["thinking"], {"type": "enabled"})
         self.assertEqual(payload["reasoning_effort"], "high")
+
+    @patch("monitor.download_recent_history")
+    @patch("monitor.load_stored_history")
+    @patch("monitor.download_fred_history", side_effect=TimeoutError("FRED timeout"))
+    def test_fred_timeout_uses_stored_history(self, _fred, stored, recent):
+        base = pd.DataFrame({"Close": [100.0]}, index=pd.to_datetime(["2026-07-10"]))
+        stored.return_value = base
+        recent.return_value = pd.DataFrame(
+            {"Close": [101.0]}, index=pd.to_datetime(["2026-07-13"])
+        )
+
+        result = download_history(refresh_fred=True)
+
+        self.assertEqual(result.iloc[-1]["Source"], "Yahoo")
+        self.assertTrue(result.iloc[-1]["Is_Provisional"])
+
+    @patch("monitor.send_email")
+    @patch("monitor.download_history")
+    @patch("monitor.previous_market_date")
+    def test_no_new_market_day_does_not_email(self, previous, download, send_email):
+        end = pd.Timestamp.now(tz=NEW_YORK).tz_localize(None).normalize()
+        index = pd.bdate_range(end=end, periods=300)
+        download.return_value = pd.DataFrame(
+            {"Close": range(1000, 1300), "Source": "FRED", "Is_Provisional": False},
+            index=index,
+        )
+        previous.return_value = index[-1].date()
+
+        self.assertFalse(job())
+        send_email.assert_not_called()
+
+    @patch("monitor.send_email")
+    @patch("monitor.export_data")
+    @patch("monitor.request_ai_analysis", return_value=("analysis", "DeepSeek", "model"))
+    @patch("monitor.build_market_context", return_value=(pd.DataFrame(), {}))
+    @patch("monitor.download_history")
+    @patch("monitor.previous_market_date")
+    def test_force_email_sends_once(
+        self, previous, download, _context, _analysis, _export, send_email
+    ):
+        end = pd.Timestamp.now(tz=NEW_YORK).tz_localize(None).normalize()
+        index = pd.bdate_range(end=end, periods=300)
+        download.return_value = pd.DataFrame(
+            {"Close": range(1000, 1300), "Source": "FRED", "Is_Provisional": False},
+            index=index,
+        )
+        previous.return_value = index[-1].date()
+
+        self.assertTrue(job(force=True))
+        send_email.assert_called_once()
 
 
 if __name__ == "__main__":

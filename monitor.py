@@ -4,8 +4,10 @@ import json
 import math
 import os
 import smtplib
+import subprocess
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -20,18 +22,32 @@ TICKER = "^NDX"
 MARKET_NAME = "NASDAQ-100"
 START_DATE = "1990-01-01"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQ100&cosd=1990-01-01"
+FRED_CONTEXT_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VXNCLS,DGS10"
+NASDAQ_COMPONENTS_URL = "https://api.nasdaq.com/api/quote/list-type/nasdaq100"
 CSV_PATH = Path("nasdaq100_daily_data.csv")
+CONTEXT_CSV_PATH = Path("market_context_daily.csv")
 WEB_DATA_DIR = Path("web/public/data")
 WEB_JSON_PATH = WEB_DATA_DIR / "nasdaq100.json"
 WEB_ANALYSIS_PATH = WEB_DATA_DIR / "analysis.json"
+WEB_CONTEXT_PATH = WEB_DATA_DIR / "context.json"
 WEB_CSV_PATH = WEB_DATA_DIR / CSV_PATH.name
 NEW_YORK = ZoneInfo("America/New_York")
 
 
+def fetch_bytes(url: str, timeout: int = 45) -> bytes:
+    try:
+        return subprocess.run(
+            ["curl", "-sS", "--fail", "--max-time", str(timeout), url],
+            check=True,
+            capture_output=True,
+            timeout=timeout + 5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"网络下载失败: {error}") from error
+
+
 def download_fred_history() -> pd.DataFrame:
-    request = urllib.request.Request(FRED_URL, headers={"User-Agent": "nasdaq100-monitor/1.0"})
-    with urllib.request.urlopen(request, timeout=45) as response:
-        content = response.read()
+    content = fetch_bytes(FRED_URL)
     data = pd.read_csv(
         io.BytesIO(content),
         parse_dates=["observation_date"],
@@ -39,12 +55,15 @@ def download_fred_history() -> pd.DataFrame:
     )
     if data.empty or "NASDAQ100" not in data:
         raise RuntimeError("FRED NASDAQ-100 行情下载为空或缺少 NASDAQ100 列")
-    return (
+    result = (
         data.rename(columns={"observation_date": "Date", "NASDAQ100": "Close"})
         .set_index("Date")[["Close"]]
         .dropna()
         .sort_index()
     )
+    result["Source"] = "FRED"
+    result["Is_Provisional"] = False
+    return result
 
 
 def download_recent_history() -> pd.DataFrame:
@@ -66,29 +85,215 @@ def download_recent_history() -> pd.DataFrame:
 
 
 def merge_recent_history(fred: pd.DataFrame, recent: pd.DataFrame) -> pd.DataFrame:
-    # FRED 保留为权威历史基准；Yahoo 只补 FRED 尚未发布的交易日。
-    additions = recent.loc[recent.index > fred.index[-1], ["Close"]]
-    return pd.concat([fred, additions]).sort_index()
+    base = fred.copy()
+    if "Source" not in base:
+        base["Source"] = "FRED"
+    if "Is_Provisional" not in base:
+        base["Is_Provisional"] = False
+    for date, row in recent.iterrows():
+        if date not in base.index or bool(base.at[date, "Is_Provisional"]):
+            base.loc[date, ["Close", "Source", "Is_Provisional"]] = [
+                float(row["Close"]),
+                "Yahoo",
+                True,
+            ]
+    base["Is_Provisional"] = base["Is_Provisional"].astype(bool)
+    return base.sort_index()
 
 
 def load_stored_history(path: Path = CSV_PATH) -> pd.DataFrame:
     if not path.exists():
         raise RuntimeError("FRED 不可用且仓库中没有 NASDAQ-100 历史缓存")
-    return pd.read_csv(path, usecols=["Date", "Close"], parse_dates=["Date"]).set_index("Date")
+    data = pd.read_csv(path, parse_dates=["Date"]).set_index("Date")
+    result = data[["Close"]].copy()
+    result["Source"] = data["Source"] if "Source" in data else "FRED"
+    result["Is_Provisional"] = data["Is_Provisional"] if "Is_Provisional" in data else False
+    result["Is_Provisional"] = result["Is_Provisional"].astype(bool)
+    return result
 
 
-def download_history() -> pd.DataFrame:
-    try:
-        fred = download_fred_history()
-    except Exception as error:
-        print(f"⚠️ FRED 暂时不可用，使用仓库中的权威历史缓存: {error}")
+def download_history(*, refresh_fred: bool = False) -> pd.DataFrame:
+    if refresh_fred or not CSV_PATH.exists():
+        try:
+            fred = download_fred_history()
+            print("✅ FRED 权威历史校准完成")
+        except Exception as error:
+            print(f"⚠️ FRED 暂时不可用，使用仓库中的权威历史缓存: {error}")
+            fred = load_stored_history()
+    else:
         fred = load_stored_history()
+        print("使用仓库中的 FRED 历史基准；本次不执行全量校准")
     try:
         return merge_recent_history(fred, download_recent_history())
     except Exception as error:
         # ponytail: Yahoo 是时效补充源；不可用时保留 FRED，旧日期检查会阻止重复日报。
         print(f"⚠️ Yahoo 最新行情不可用，仅使用 FRED: {error}")
         return fred
+
+
+def download_fred_context() -> pd.DataFrame:
+    content = fetch_bytes(FRED_CONTEXT_URL)
+    frames = []
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        for name in archive.namelist():
+            if not name.endswith(".csv"):
+                continue
+            frame = pd.read_csv(archive.open(name), parse_dates=["observation_date"], na_values=".")
+            frames.append(frame.set_index("observation_date"))
+    if not frames:
+        raise RuntimeError("FRED VXN/10年期美债数据包中没有 CSV")
+    data = pd.concat(frames, axis=1).sort_index()
+    if not {"VXNCLS", "DGS10"}.issubset(data.columns):
+        raise RuntimeError("FRED 市场环境数据缺少 VXNCLS 或 DGS10")
+    return data.rename(columns={"VXNCLS": "VXN", "DGS10": "Treasury10Y"})[
+        ["VXN", "Treasury10Y"]
+    ]
+
+
+def load_context_history() -> pd.DataFrame:
+    if not CONTEXT_CSV_PATH.exists():
+        return pd.DataFrame(columns=["VXN", "Treasury10Y"])
+    return pd.read_csv(CONTEXT_CSV_PATH, parse_dates=["Date"]).set_index("Date")
+
+
+def download_recent_context() -> dict:
+    data = yf.download(
+        ["^VXN", "^TNX", "^NDXA200R"],
+        period="1mo",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        group_by="column",
+        timeout=30,
+    )
+    if data.empty or "Close" not in data:
+        raise RuntimeError("Yahoo VXN/10年期美债行情下载为空")
+    close = data["Close"]
+    result = {}
+    for ticker, name in (("^VXN", "vxn"), ("^TNX", "treasury10y")):
+        series = close[ticker].dropna()
+        if not series.empty:
+            result[name] = {
+                "value": round(float(series.iloc[-1]), 2),
+                "as_of": pd.Timestamp(series.index[-1]).date().isoformat(),
+                "source": "Yahoo（临时）",
+            }
+    breadth = close["^NDXA200R"].dropna() if "^NDXA200R" in close else pd.Series(dtype=float)
+    if not breadth.empty:
+        result["breadth"] = {
+            "above_ema200_pct": round(float(breadth.iloc[-1]), 2),
+            "above_ema200_count": None,
+            "sample_size": None,
+            "as_of": pd.Timestamp(breadth.index[-1]).date().isoformat(),
+            "source": "NDXA200R（Yahoo）",
+        }
+    return result
+
+
+def latest_context_value(data: pd.DataFrame, column: str) -> dict | None:
+    series = data[column].dropna() if column in data else pd.Series(dtype=float)
+    if series.empty:
+        return None
+    return {
+        "value": round(float(series.iloc[-1]), 2),
+        "as_of": pd.Timestamp(series.index[-1]).date().isoformat(),
+        "source": "FRED",
+    }
+
+
+def download_components() -> list[str]:
+    request = urllib.request.Request(
+        NASDAQ_COMPONENTS_URL,
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json, text/plain, */*"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.load(response)
+    rows = result["data"]["data"]["rows"]
+    symbols = sorted({row["symbol"].replace("/", "-") for row in rows if row.get("symbol")})
+    if len(symbols) < 90:
+        raise RuntimeError(f"Nasdaq 官方成分名单仅返回 {len(symbols)} 个代码")
+    return symbols
+
+
+def calculate_breadth(symbols: list[str]) -> dict:
+    data = yf.download(
+        symbols,
+        period="1y",
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+        group_by="column",
+        threads=True,
+        timeout=45,
+    )
+    if data.empty or "Close" not in data:
+        raise RuntimeError("NASDAQ-100 成分股日线下载为空")
+    close = data["Close"]
+    observations = []
+    dates = []
+    for symbol in close.columns:
+        series = close[symbol].dropna()
+        if len(series) < 200:
+            continue
+        observations.append(float(series.iloc[-1]) > float(series.ewm(span=200, adjust=False).mean().iloc[-1]))
+        dates.append(pd.Timestamp(series.index[-1]))
+    if len(observations) < 80:
+        raise RuntimeError(f"仅有 {len(observations)} 个成分股具备 200 日数据")
+    above = sum(observations)
+    return {
+        "above_ema200_pct": round(above / len(observations) * 100, 2),
+        "above_ema200_count": above,
+        "sample_size": len(observations),
+        "as_of": max(dates).date().isoformat(),
+        "source": "Nasdaq 成分名单 + Yahoo 日线",
+    }
+
+
+def load_previous_context() -> dict:
+    if not WEB_CONTEXT_PATH.exists():
+        return {}
+    return json.loads(WEB_CONTEXT_PATH.read_text(encoding="utf-8"))
+
+
+def build_market_context(*, refresh_fred: bool = False) -> tuple[pd.DataFrame, dict]:
+    history = load_context_history()
+    if refresh_fred or history.empty:
+        try:
+            history = download_fred_context()
+            print("✅ FRED VXN 与 10年期美债校准完成")
+        except Exception as error:
+            print(f"⚠️ FRED 市场环境数据不可用，使用缓存: {error}")
+    previous = load_previous_context()
+    context = {
+        "vxn": latest_context_value(history, "VXN") or previous.get("vxn"),
+        "treasury10y": latest_context_value(history, "Treasury10Y") or previous.get("treasury10y"),
+        "breadth": previous.get("breadth"),
+    }
+    breadth_updated = False
+    try:
+        recent = download_recent_context()
+        breadth_updated = "breadth" in recent
+        context.update(recent)
+    except Exception as error:
+        print(f"⚠️ Yahoo 市场环境数据不可用，使用缓存: {error}")
+    if not breadth_updated:
+        try:
+            context["breadth"] = calculate_breadth(download_components())
+        except Exception as error:
+            print(f"⚠️ NASDAQ-100 市场广度不可用，使用缓存: {error}")
+    return history, context
+
+
+def build_freshness(data: pd.DataFrame) -> dict:
+    latest_date = data.index[-1].date()
+    age_days = (datetime.now(NEW_YORK).date() - latest_date).days
+    status = "正常" if age_days <= 3 else "延迟" if age_days <= 5 else "严重过期"
+    return {
+        "status": status,
+        "age_days": age_days,
+        "latest_market_date": latest_date.isoformat(),
+        "checked_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+    }
 
 
 def calculate_indicators(prices: pd.DataFrame) -> pd.DataFrame:
@@ -123,6 +328,8 @@ def validate_history(data: pd.DataFrame) -> None:
         raise RuntimeError("NASDAQ-100 最新收盘价无效")
     if data.index[-1].date() > datetime.now(NEW_YORK).date():
         raise RuntimeError("NASDAQ-100 最新行情日期晚于纽约当前日期")
+    if (datetime.now(NEW_YORK).date() - data.index[-1].date()).days > 7:
+        raise RuntimeError("NASDAQ-100 行情已超过 7 天未更新，请检查 Yahoo 与 FRED 数据源")
 
 
 def previous_market_date(path: Path = CSV_PATH):
@@ -150,7 +357,7 @@ def classify_signal(current: pd.Series, previous: pd.Series) -> tuple[str, str]:
     return "防御阶段", "收盘价位于 EMA200 下方"
 
 
-def build_snapshot(data: pd.DataFrame) -> dict:
+def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
     latest = data.iloc[-1]
     previous = data.iloc[-2]
     close = data["Close"]
@@ -181,6 +388,14 @@ def build_snapshot(data: pd.DataFrame) -> dict:
         "max_drawdown_pct": round(float(data["Drawdown_Pct"].min()), 2),
         "status": status,
         "status_detail": status_detail,
+        "context": context,
+        "freshness": freshness,
+        "provenance": {
+            "latest_source": str(latest["Source"]),
+            "latest_is_provisional": bool(latest["Is_Provisional"]),
+            "authoritative_through": data.loc[~data["Is_Provisional"].astype(bool)].index[-1].date().isoformat(),
+            "provisional_rows": int(data["Is_Provisional"].astype(bool).sum()),
+        },
     }
 
 
@@ -189,12 +404,17 @@ def _round_optional(value: float | None) -> float | None:
 
 
 def deterministic_analysis(snapshot: dict) -> str:
+    context = snapshot.get("context", {})
+    breadth = context.get("breadth") or {}
+    vxn = context.get("vxn") or {}
+    treasury = context.get("treasury10y") or {}
     return "\n".join(
         [
             f"市场状态：{snapshot['status']}。{snapshot['status_detail']}，当前距 EMA200 {snapshot['distance_ema200_pct']:+.2f}%。",
             f"动量观察：RSI14 为 {snapshot['rsi14']:.2f}，近 20 日年化波动率为 {snapshot['volatility20_pct']:.2f}%。",
             f"风险位置：指数距 52 周高点 {snapshot['distance_high252_pct']:+.2f}%，当前历史高点回撤 {snapshot['drawdown_pct']:.2f}%。",
-            "观察建议：下一交易日重点确认价格与 EMA50、EMA200 的相对位置，以及波动率是否继续扩张。仅作数据观察，不构成投资建议。",
+            f"环境观察：VXN {vxn.get('value', '—')}，10年期美债 {treasury.get('value', '—')}%，成分股位于 EMA200 上方比例 {breadth.get('above_ema200_pct', '—')}%。",
+            "条件框架：若价格维持 EMA200 上方且市场广度改善，趋势确认度提高；若跌破 EMA200 并伴随 VXN 上升，则应优先控制风险。仅作数据观察，不构成投资建议。",
         ]
     )
 
@@ -211,7 +431,8 @@ def build_ai_request(snapshot: dict) -> tuple[str, dict, str, str]:
                 "content": (
                     "你是一名审慎的市场数据分析员。只能使用用户提供的 NASDAQ-100 指标，不得虚构新闻、宏观事件或实时信息。"
                     "用中文输出四个短段落：市场状态、动量与趋势、主要风险、下一交易日观察点。"
-                    "区分事实与推断，可以给出买入、卖出、重仓或清仓指令的建议，结尾注明不构成投资建议。"
+                    "区分事实与推断，只提供条件化风险管理框架，不给出绝对买入、卖出、重仓或清仓指令。"
+                    "明确指出数据来源与临时数据的局限，结尾注明不构成投资建议。"
                 ),
             },
             {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
@@ -249,14 +470,32 @@ def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
         return deterministic_analysis(snapshot), "规则分析（AI 回退）", model
 
 
-def export_data(data: pd.DataFrame, snapshot: dict, analysis: dict) -> None:
+def export_data(
+    data: pd.DataFrame,
+    snapshot: dict,
+    analysis: dict,
+    context_history: pd.DataFrame,
+    context: dict,
+) -> None:
     WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
     export = data.copy()
     export.index.name = "Date"
     export.to_csv(CSV_PATH, encoding="utf-8-sig", float_format="%.4f")
     export.to_csv(WEB_CSV_PATH, encoding="utf-8-sig", float_format="%.4f")
+    if not context_history.empty:
+        context_history.index.name = "Date"
+        context_history.to_csv(CONTEXT_CSV_PATH, encoding="utf-8-sig", float_format="%.4f")
 
-    columns = ["Close", "EMA50", "EMA200", "RSI14", "Volatility20_Pct", "Drawdown_Pct"]
+    columns = [
+        "Close",
+        "EMA50",
+        "EMA200",
+        "RSI14",
+        "Volatility20_Pct",
+        "Drawdown_Pct",
+        "Source",
+        "Is_Provisional",
+    ]
     records = []
     for date, row in data[columns].iterrows():
         records.append(
@@ -268,6 +507,8 @@ def export_data(data: pd.DataFrame, snapshot: dict, analysis: dict) -> None:
                 "rsi14": _json_number(row["RSI14"]),
                 "volatility20_pct": _json_number(row["Volatility20_Pct"]),
                 "drawdown_pct": _json_number(row["Drawdown_Pct"]),
+                "source": str(row["Source"]),
+                "is_provisional": bool(row["Is_Provisional"]),
             }
         )
     WEB_JSON_PATH.write_text(
@@ -289,6 +530,9 @@ def export_data(data: pd.DataFrame, snapshot: dict, analysis: dict) -> None:
     WEB_ANALYSIS_PATH.write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
     )
+    WEB_CONTEXT_PATH.write_text(
+        json.dumps(context, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
+    )
 
 
 def _json_number(value) -> float | None:
@@ -304,6 +548,11 @@ def send_email(snapshot: dict, analysis: dict) -> None:
         f"[NDX {snapshot['daily_return_pct']:+.2f}%] NASDAQ-100 日报 "
         f"{snapshot['market_date']} · {snapshot['status']}"
     )
+    context = snapshot.get("context", {})
+    vxn = (context.get("vxn") or {}).get("value", "—")
+    treasury = (context.get("treasury10y") or {}).get("value", "—")
+    breadth = (context.get("breadth") or {}).get("above_ema200_pct", "—")
+    dashboard_url = os.getenv("DASHBOARD_URL")
     content = "\n".join(
         [
             "【NASDAQ-100 每日市场扫描】",
@@ -314,10 +563,15 @@ def send_email(snapshot: dict, analysis: dict) -> None:
             f"EMA50 / EMA200：{snapshot['ema50']:.2f} / {snapshot['ema200']:.2f}",
             f"RSI14 / 20日年化波动率：{snapshot['rsi14']:.2f} / {snapshot['volatility20_pct']:.2f}%",
             f"距52周高点 / 当前回撤：{snapshot['distance_high252_pct']:+.2f}% / {snapshot['drawdown_pct']:.2f}%",
+            f"VXN / 10年期美债：{vxn} / {treasury}%",
+            f"成分股站上 EMA200：{breadth}%",
+            f"数据来源：{snapshot['provenance']['latest_source']}"
+            + ("（临时，待 FRED 校准）" if snapshot['provenance']['latest_is_provisional'] else "（权威）"),
             "",
             f"【{analysis['source']}】",
             analysis["text"],
             "",
+            *( [f"网页仪表盘：{dashboard_url}", ""] if dashboard_url else [] ),
             "详细历史数据见附件。",
         ]
     )
@@ -339,17 +593,23 @@ def send_email(snapshot: dict, analysis: dict) -> None:
     print(f"✅ 邮件已发送至 {receiver}")
 
 
-def job(*, send_mail: bool = True, force: bool = False) -> bool:
+def job(*, send_mail: bool = True, force: bool = False, refresh_fred: bool = False) -> bool:
     old_date = previous_market_date()
-    print(f"正在下载 {MARKET_NAME} ({TICKER})：FRED 历史 + Yahoo 最新交易日...")
-    data = calculate_indicators(download_history())
+    print(f"正在更新 {MARKET_NAME} ({TICKER})：历史基准 + Yahoo 最新交易日...")
+    data = calculate_indicators(download_history(refresh_fred=refresh_fred))
     validate_history(data)
+    freshness = build_freshness(data)
     latest_date = data.index[-1].date()
     if not force and old_date is not None and latest_date <= old_date:
-        print(f"没有新的交易日数据（最新 {latest_date}），跳过日报和提交")
+        print(
+            f"没有新的交易日数据（最新 {latest_date}，新鲜度：{freshness['status']}），跳过日报和提交"
+        )
         return False
 
-    snapshot = build_snapshot(data)
+    context_history, context = build_market_context(refresh_fred=refresh_fred)
+    snapshot = build_snapshot(data, context, freshness)
+    context["freshness"] = freshness
+    context["provenance"] = snapshot["provenance"]
     text, source, model = request_ai_analysis(snapshot)
     analysis = {
         "market_date": snapshot["market_date"],
@@ -360,7 +620,7 @@ def job(*, send_mail: bool = True, force: bool = False) -> bool:
         "disclaimer": "仅供数据研究与市场观察，不构成投资建议。",
     }
     print(f"✅ 分析来源: {source}" + (f" ({model})" if model else ""))
-    export_data(data, snapshot, analysis)
+    export_data(data, snapshot, analysis, context_history, context)
     print(f"✅ 已更新至 {latest_date}，共 {len(data)} 个交易日")
     if send_mail:
         send_email(snapshot, analysis)
@@ -371,5 +631,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="NASDAQ-100 每日监控")
     parser.add_argument("--no-email", action="store_true", help="生成数据但不发送邮件")
     parser.add_argument("--force", action="store_true", help="即使没有新交易日也重新生成")
+    parser.add_argument("--refresh-fred", action="store_true", help="执行每周 FRED 权威历史校准")
     arguments = parser.parse_args()
-    job(send_mail=not arguments.no_email, force=arguments.force)
+    job(
+        send_mail=not arguments.no_email,
+        force=arguments.force,
+        refresh_fred=arguments.refresh_fred,
+    )

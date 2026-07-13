@@ -1,0 +1,25 @@
+{
+  "vxn": {
+    "value": 24.89,
+    "as_of": "2026-07-10",
+    "source": "FRED"
+  },
+  "treasury10y": {
+    "value": 4.54,
+    "as_of": "2026-07-09",
+    "source": "FRED"
+  },
+  "breadth": null,
+  "freshness": {
+    "status": "正常",
+    "age_days": 3,
+    "latest_market_date": "2026-07-10",
+    "checked_at": "2026-07-13T17:53:52.340395+00:00"
+  },
+  "provenance": {
+    "latest_source": "FRED",
+    "latest_is_provisional": false,
+    "authoritative_through": "2026-07-10",
+    "provisional_rows": 0
+  }
+}
