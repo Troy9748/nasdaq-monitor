@@ -51,7 +51,8 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(model, "deepseek-v4-flash")
         self.assertEqual(provider, "DeepSeek")
         self.assertEqual(payload["messages"][1]["role"], "user")
-        self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+        self.assertEqual(payload["reasoning_effort"], "high")
 
 
 if __name__ == "__main__":

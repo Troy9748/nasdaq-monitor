@@ -29,6 +29,8 @@
 5. 使用 DeepSeek 时再新增变量或 Secret `OPENAI_BASE_URL`，值为 `https://api.deepseek.com`；工作流优先读取 Secret。
 6. 到 **Actions → Daily NASDAQ-100 Check → Run workflow**，勾选“重新生成 AI 分析”后手动验证一次；该模式不发邮件。不要把 key 写进代码、CSV 或网页。
 
+需要完整测试 DeepSeek、数据导出和邮件链路时，只勾选“强制完整分析并发送一封测试邮件”。两个手动选项同时勾选时，邮件测试优先。
+
 ## 本地运行
 
 ```bash

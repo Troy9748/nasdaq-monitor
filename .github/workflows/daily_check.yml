@@ -10,6 +10,10 @@ on:
         description: "重新生成 AI 分析和网页数据（不发邮件）"
         type: boolean
         default: false
+      force_email:
+        description: "强制完整分析并发送一封测试邮件"
+        type: boolean
+        default: false
 
 concurrency:
   group: nasdaq100-daily
@@ -36,6 +40,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Update data, analysis and email
+        timeout-minutes: 5
         env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
@@ -43,7 +48,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
-        run: python monitor.py ${{ inputs.force_refresh && '--force --no-email' || '' }}
+        run: python -u monitor.py ${{ inputs.force_email && '--force' || inputs.force_refresh && '--force --no-email' || '' }}
 
       - name: Commit new market day
         run: |

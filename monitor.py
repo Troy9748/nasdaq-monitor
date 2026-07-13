@@ -238,7 +238,7 @@ def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with urllib.request.urlopen(request, timeout=120) as response:
             result = json.load(response)
         text = result["choices"][0]["message"]["content"].strip()
         if not text:
