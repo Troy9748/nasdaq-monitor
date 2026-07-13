@@ -211,16 +211,17 @@ def build_ai_request(snapshot: dict) -> tuple[str, dict, str, str]:
                 "content": (
                     "你是一名审慎的市场数据分析员。只能使用用户提供的 NASDAQ-100 指标，不得虚构新闻、宏观事件或实时信息。"
                     "用中文输出四个短段落：市场状态、动量与趋势、主要风险、下一交易日观察点。"
-                    "区分事实与推断，不给出买入、卖出、重仓或清仓指令，结尾注明不构成投资建议。"
+                    "区分事实与推断，可以给出买入、卖出、重仓或清仓指令的建议，结尾注明不构成投资建议。"
                 ),
             },
             {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
         ],
-        "max_tokens": 700,
+        "max_tokens": 2000,
         "stream": False,
     }
     if provider == "DeepSeek":
-        payload["thinking"] = {"type": "disabled"}
+        payload["thinking"] = {"type": "enabled"}
+        payload["reasoning_effort"] = "high"
     return f"{base_url}/chat/completions", payload, model, provider
 
 
