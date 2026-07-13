@@ -1,47 +1,48 @@
-name: Daily Market Check
+name: Daily NASDAQ-100 Check
 
 on:
   schedule:
-    # 每天 UTC 23:00 (北京时间 07:00)
-    - cron: '0 23 * * *'
-  workflow_dispatch: # 允许手动运行
+    # UTC 周一至周五 23:00 = 北京时间周二至周六 07:00。
+    - cron: "0 23 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: nasdaq100-daily
+  cancel-in-progress: false
 
 jobs:
-  build:
+  monitor:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 15
     permissions:
       contents: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Run monitor script
+      - name: Update data, analysis and email
         env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
-        run: |
-          python monitor.py
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+        run: python monitor.py
 
-      # --- 更新 CSV 提交逻辑 ---
-      - name: Commit and Push CSV
+      - name: Commit new market day
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          
-          # 注意：这里改成了新的文件名 market_daily_data.csv
-          git add market_daily_data.csv
-          
-          # 检查变化并提交
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update: Market Data CSV" && git push)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nasdaq100_daily_data.csv web/public/data/
+          git diff --cached --quiet || git commit -m "Auto-update: NASDAQ-100 market data"
+          git push
