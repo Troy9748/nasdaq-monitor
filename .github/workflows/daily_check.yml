@@ -5,6 +5,11 @@ on:
     # UTC 周一至周五 23:00 = 北京时间周二至周六 07:00。
     - cron: "0 23 * * 1-5"
   workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "重新生成 AI 分析和网页数据（不发邮件）"
+        type: boolean
+        default: false
 
 concurrency:
   group: nasdaq100-daily
@@ -38,7 +43,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
-        run: python monitor.py
+        run: python monitor.py ${{ inputs.force_refresh && '--force --no-email' || '' }}
 
       - name: Commit new market day
         run: |

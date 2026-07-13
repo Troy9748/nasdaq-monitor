@@ -27,7 +27,7 @@
 3. Name 填 `OPENAI_API_KEY`，Secret 粘贴 API key，点击 **Add secret**。
 4. 在 **Variables** 中新增 `OPENAI_MODEL`；DeepSeek 填 `deepseek-v4-flash`。
 5. 使用 DeepSeek 时再新增变量 `OPENAI_BASE_URL`，值为 `https://api.deepseek.com`。
-6. 到 **Actions → Daily NASDAQ-100 Check → Run workflow** 手动验证一次。不要把 key 写进代码、CSV 或网页。
+6. 到 **Actions → Daily NASDAQ-100 Check → Run workflow**，勾选“重新生成 AI 分析”后手动验证一次；该模式不发邮件。不要把 key 写进代码、CSV 或网页。
 
 ## 本地运行
 

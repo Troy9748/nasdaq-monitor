@@ -358,6 +358,7 @@ def job(*, send_mail: bool = True, force: bool = False) -> bool:
         "text": text,
         "disclaimer": "仅供数据研究与市场观察，不构成投资建议。",
     }
+    print(f"✅ 分析来源: {source}" + (f" ({model})" if model else ""))
     export_data(data, snapshot, analysis)
     print(f"✅ 已更新至 {latest_date}，共 {len(data)} 个交易日")
     if send_mail:
