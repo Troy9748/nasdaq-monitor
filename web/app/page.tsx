@@ -29,6 +29,7 @@ type Summary = {
   max_drawdown_pct: number;
   status: string;
   status_detail: string;
+  alert: { level: string; code: "normal" | "watch" | "important" | "critical"; reasons: string[] };
   freshness: { status: string; age_days: number; latest_market_date: string; checked_at: string };
   provenance: {
     latest_source: string;
@@ -37,10 +38,17 @@ type Summary = {
     provisional_rows: number;
   };
   context: {
-    vxn: { value: number; as_of: string; source: string } | null;
-    treasury10y: { value: number; as_of: string; source: string } | null;
-    breadth: { above_ema200_pct: number; above_ema200_count: number | null; sample_size: number | null; as_of: string; source: string } | null;
+    vxn: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
+    treasury10y: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
+    breadth: { above_ema200_pct: number; above_ema200_count: number | null; sample_size: number | null; as_of: string; source: string; freshness?: string; age_days?: number } | null;
+    calibration?: { checked_at: string; corrected_rows: number; pending_rows: number; max_abs_diff_pct: number | null; max_diff_date: string | null } | null;
   };
+};
+
+type RegimeAnalysis = {
+  current: string;
+  stats: Record<string, { observations: number; forward: Record<string, { samples: number; median_return_pct: number | null; positive_rate_pct: number | null }> }>;
+  recent_events: Array<{ date: string; state: string }>;
 };
 
 type MarketData = {
@@ -49,8 +57,12 @@ type MarketData = {
   start_date: string;
   latest_date: string;
   summary: Summary;
+  regime_analysis: RegimeAnalysis;
   series: Point[];
 };
+
+type ContextPoint = { date: string; vxn: number | null; treasury10y: number | null; ndx_vxn_corr60: number | null };
+type ContextData = { series: ContextPoint[] };
 
 type Analysis = {
   market_date: string;
@@ -62,6 +74,8 @@ type Analysis = {
 };
 
 const ranges = { "1年": 252, "3年": 756, "5年": 1260, "10年": 2520, 全部: Infinity } as const;
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const assetPath = (path: string) => `${basePath}${path}`;
 
 function signed(value: number | null | undefined, suffix = "%") {
   return value == null ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}${suffix}`;
@@ -248,6 +262,68 @@ function IndicatorChart({
   return <canvas className="indicator-canvas" ref={canvasRef} aria-label={`${field}历史走势图`} />;
 }
 
+function ContextIndicatorChart({
+  points,
+  field,
+  color,
+  label,
+  reference,
+}: {
+  points: ContextPoint[];
+  field: "vxn" | "treasury10y" | "ndx_vxn_corr60";
+  color: string;
+  label: string;
+  reference?: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const draw = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(bounds.width * ratio));
+      canvas.height = Math.max(1, Math.floor(bounds.height * ratio));
+      const context = canvas.getContext("2d");
+      const values = points.map((point) => point[field]).filter((value): value is number => value != null);
+      if (!context || values.length < 2) return;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+      const min = Math.min(...values, reference ?? Infinity);
+      const max = Math.max(...values, reference ?? -Infinity);
+      const spread = max - min || 1;
+      const x = (index: number) => (index / Math.max(1, points.length - 1)) * bounds.width;
+      const y = (value: number) => 8 + (bounds.height - 16) * (1 - (value - min) / spread);
+      if (reference != null) {
+        context.setLineDash([4, 4]);
+        context.strokeStyle = "rgba(148,163,184,.28)";
+        context.beginPath();
+        context.moveTo(0, y(reference));
+        context.lineTo(bounds.width, y(reference));
+        context.stroke();
+        context.setLineDash([]);
+      }
+      context.strokeStyle = color;
+      context.lineWidth = 1.6;
+      context.beginPath();
+      let started = false;
+      points.forEach((point, index) => {
+        const value = point[field];
+        if (value == null) return;
+        if (!started) context.moveTo(x(index), y(value));
+        else context.lineTo(x(index), y(value));
+        started = true;
+      });
+      context.stroke();
+    };
+    draw();
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [points, field, color, reference]);
+  return <canvas className="indicator-canvas" ref={canvasRef} aria-label={label} />;
+}
+
 function RegimeTimeline({ points }: { points: Point[] }) {
   const sampled = points.filter((_, index) => index % Math.max(1, Math.floor(points.length / 180)) === 0);
   return (
@@ -263,21 +339,24 @@ function RegimeTimeline({ points }: { points: Point[] }) {
 export default function Home() {
   const [market, setMarket] = useState<MarketData | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [context, setContext] = useState<ContextData | null>(null);
   const [range, setRange] = useState<keyof typeof ranges>("5年");
   const [logScale, setLogScale] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
-      fetch("/data/nasdaq100.json").then((response) => {
+      fetch(assetPath("/data/nasdaq100.json")).then((response) => {
         if (!response.ok) throw new Error("市场数据尚未生成");
         return response.json();
       }),
-      fetch("/data/analysis.json").then((response) => response.json()),
+      fetch(assetPath("/data/analysis.json")).then((response) => response.json()),
+      fetch(assetPath("/data/context.json")).then((response) => response.json()),
     ])
-      .then(([marketData, analysisData]) => {
+      .then(([marketData, analysisData, contextData]) => {
         setMarket(marketData);
         setAnalysis(analysisData);
+        setContext(contextData);
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "数据加载失败"));
   }, []);
@@ -288,10 +367,16 @@ export default function Home() {
     return Number.isFinite(sessions) ? market.series.slice(-sessions) : market.series;
   }, [market, range]);
 
+  const visibleContext = useMemo(() => {
+    if (!context || !visiblePoints.length) return [];
+    const start = visiblePoints[0].date;
+    return context.series.filter((point) => point.date >= start);
+  }, [context, visiblePoints]);
+
   if (error) {
     return <main className="center-state"><strong>数据暂不可用</strong><span>{error}</span></main>;
   }
-  if (!market || !analysis) {
+  if (!market || !analysis || !context) {
     return <main className="center-state"><span className="pulse" /><strong>正在载入 NASDAQ-100 历史数据</strong></main>;
   }
 
@@ -309,8 +394,8 @@ export default function Home() {
     <main>
       <header className="topbar">
         <div className="brand"><span className="brand-mark">N</span><div><strong>NDX SIGNAL DESK</strong><small>NASDAQ-100 MARKET INTELLIGENCE</small></div></div>
-        <div className="market-stamp"><span className={`live-dot ${summary.freshness.status !== "正常" ? "warn" : ""}`} />数据截至 {summary.market_date}<span>·</span>{summary.freshness.status}</div>
-        <a className="download" href="/data/nasdaq100_daily_data.csv" download>下载完整 CSV</a>
+        <div className="market-stamp"><span className={`live-dot ${summary.freshness.status !== "正常" ? "warn" : ""}`} />数据截至 {summary.market_date}<span>·</span>{summary.freshness.status}<span className={`alert-chip ${summary.alert.code}`}>{summary.alert.level}</span></div>
+        <a className="download" href={assetPath("/data/nasdaq100_daily_data.csv")} download>下载完整 CSV</a>
       </header>
 
       <div className="dashboard">
@@ -321,7 +406,7 @@ export default function Home() {
             <p>{summary.status_detail}</p>
           </div>
           <div className={`regime ${summary.distance_ema200_pct >= 0 ? "regime-up" : "regime-down"}`}>
-            <span>市场状态</span><strong>{summary.status}</strong><small>距 EMA200 {signed(summary.distance_ema200_pct)}</small>
+            <span>市场状态 · {summary.alert.level}</span><strong>{summary.status}</strong><small>距 EMA200 {signed(summary.distance_ema200_pct)}</small><small>{summary.alert.reasons.join("；")}</small>
           </div>
         </section>
 
@@ -336,9 +421,9 @@ export default function Home() {
 
         <section className="context-strip panel">
           <div><span>数据口径</span><strong>{summary.provenance.latest_source}{summary.provenance.latest_is_provisional ? " · 临时" : " · 权威"}</strong><small>FRED 校准至 {summary.provenance.authoritative_through}</small></div>
-          <div><span>VXN</span><strong>{number(summary.context.vxn?.value)}</strong><small>{summary.context.vxn?.as_of ?? "暂无数据"} · {summary.context.vxn?.source ?? "—"}</small></div>
-          <div><span>10年期美债</span><strong>{summary.context.treasury10y ? `${number(summary.context.treasury10y.value)}%` : "—"}</strong><small>{summary.context.treasury10y?.as_of ?? "暂无数据"} · {summary.context.treasury10y?.source ?? "—"}</small></div>
-          <div><span>成分股站上 EMA200</span><strong>{summary.context.breadth ? `${number(summary.context.breadth.above_ema200_pct)}%` : "待首次成功计算"}</strong><small>{summary.context.breadth ? `${summary.context.breadth.above_ema200_count == null ? summary.context.breadth.source : `${summary.context.breadth.above_ema200_count}/${summary.context.breadth.sample_size}`} · ${summary.context.breadth.as_of}` : "Nasdaq 名单 + Yahoo 日线"}</small></div>
+          <div><span>VXN</span><strong>{number(summary.context.vxn?.value)}</strong><small>{summary.context.vxn?.as_of ?? "暂无数据"} · {summary.context.vxn?.source ?? "—"} · {summary.context.vxn?.freshness ?? "—"}</small></div>
+          <div><span>10年期美债</span><strong>{summary.context.treasury10y ? `${number(summary.context.treasury10y.value)}%` : "—"}</strong><small>{summary.context.treasury10y?.as_of ?? "暂无数据"} · {summary.context.treasury10y?.source ?? "—"} · {summary.context.treasury10y?.freshness ?? "—"}</small></div>
+          <div><span>成分股站上 EMA200</span><strong>{summary.context.breadth ? `${number(summary.context.breadth.above_ema200_pct)}%` : "待首次成功计算"}</strong><small>{summary.context.breadth ? `${summary.context.breadth.above_ema200_count == null ? summary.context.breadth.source : `${summary.context.breadth.above_ema200_count}/${summary.context.breadth.sample_size}`} · ${summary.context.breadth.as_of} · ${summary.context.breadth.freshness ?? "—"}` : "Nasdaq 名单 + Yahoo 日线"}</small></div>
         </section>
 
         <section className="chart-panel panel">
@@ -346,9 +431,9 @@ export default function Home() {
             <div><span className="eyebrow">PRICE STRUCTURE</span><h2>长期趋势与均线结构</h2></div>
             <div className="chart-controls">
               <div className="segmented" aria-label="时间范围">
-                {(Object.keys(ranges) as Array<keyof typeof ranges>).map((label) => <button key={label} className={range === label ? "active" : ""} onClick={() => setRange(label)}>{label}</button>)}
+                {(Object.keys(ranges) as Array<keyof typeof ranges>).map((label) => <button key={label} aria-pressed={range === label} className={range === label ? "active" : ""} onClick={() => setRange(label)}>{label}</button>)}
               </div>
-              <button className={`scale-button ${logScale ? "active" : ""}`} onClick={() => setLogScale((value) => !value)}>对数尺度</button>
+              <button aria-pressed={logScale} className={`scale-button ${logScale ? "active" : ""}`} onClick={() => setLogScale((value) => !value)}>对数尺度</button>
             </div>
           </div>
           <div className="legend"><span><i className="close-line" />收盘</span><span><i className="ema50-line" />EMA50</span><span><i className="ema200-line" />EMA200</span></div>
@@ -366,6 +451,37 @@ export default function Home() {
           </div>
         </section>
 
+        <section className="context-history panel">
+          <div className="section-head"><div><span className="eyebrow">MARKET CONTEXT</span><h2>市场环境历史联动</h2></div><span className="row-count">与所选价格区间同步</span></div>
+          <div className="risk-grid">
+            <article><div><span>VXN 波动率预期</span><strong>{number(summary.context.vxn?.value)}</strong></div><ContextIndicatorChart points={visibleContext} field="vxn" color="#fb7185" label="VXN 历史走势" /></article>
+            <article><div><span>美国10年期收益率</span><strong>{number(summary.context.treasury10y?.value)}%</strong></div><ContextIndicatorChart points={visibleContext} field="treasury10y" color="#f59e0b" label="美国10年期国债收益率历史走势" /></article>
+            <article><div><span>NDX/VXN 60日相关性</span><strong>{signed(visibleContext.at(-1)?.ndx_vxn_corr60, "")}</strong></div><ContextIndicatorChart points={visibleContext} field="ndx_vxn_corr60" color="#22d3ee" label="NASDAQ-100 收益与 VXN 变化的60日滚动相关性" reference={0} /></article>
+          </div>
+          <p className="method-note">相关性使用日收益与 VXN 日变化的 60 个交易日窗口；仅描述同期关系，不代表因果。</p>
+        </section>
+
+        <section className="regime-evidence panel">
+          <div className="section-head"><div><span className="eyebrow">SIGNAL EVIDENCE</span><h2>市场状态的历史后续表现</h2></div><span className="source-chip">当前 {market.regime_analysis.current}</span></div>
+          <div className="evidence-grid">
+            {(Object.entries(market.regime_analysis.stats)).map(([state, stats]) => (
+              <article key={state}>
+                <div className="evidence-title"><strong>{state}</strong><span>{stats.observations.toLocaleString("zh-CN")} 个交易日</span></div>
+                <table><thead><tr><th>观察期</th><th>样本</th><th>中位收益</th><th>正收益率</th></tr></thead><tbody>
+                  {Object.entries(stats.forward).map(([horizon, value]) => <tr key={horizon}><td>{horizon}</td><td>{value.samples}</td><td className={tone(value.median_return_pct)}>{signed(value.median_return_pct)}</td><td>{signed(value.positive_rate_pct)}</td></tr>)}
+                </tbody></table>
+              </article>
+            ))}
+          </div>
+          <div className="event-log"><span>最近状态切换</span>{market.regime_analysis.recent_events.slice(-6).reverse().map((event) => <div key={`${event.date}-${event.state}`}><time>{event.date}</time><strong>{event.state}</strong></div>)}</div>
+          <p className="method-note">状态仅使用当日及此前数据分类；后续收益统计自动排除尚未走完观察期的样本，不含交易成本。</p>
+        </section>
+
+        <section className="audit-panel panel">
+          <div><span className="eyebrow">DATA AUDIT</span><h2>权威数据校准</h2></div>
+          {summary.context.calibration ? <div className="audit-grid"><p><span>本次校准行数</span><strong>{summary.context.calibration.corrected_rows}</strong></p><p><span>仍待权威发布</span><strong>{summary.context.calibration.pending_rows}</strong></p><p><span>最大临时偏差</span><strong>{summary.context.calibration.max_abs_diff_pct == null ? "—" : `${summary.context.calibration.max_abs_diff_pct.toFixed(4)}%`}</strong></p><p><span>最大偏差日期</span><strong>{summary.context.calibration.max_diff_date ?? "—"}</strong></p></div> : <p className="method-note">等待下一次周度 FRED 权威校准后生成差异审计。</p>}
+        </section>
+
         <section className="returns panel">
           <div className="section-head"><div><span className="eyebrow">RETURN WINDOWS</span><h2>多周期收益</h2></div></div>
           <div className="return-grid">
@@ -375,7 +491,7 @@ export default function Home() {
         </section>
 
         <section className="ai-panel panel">
-          <div className="section-head"><div><span className="eyebrow">AI RISK BRIEF</span><h2>结构化市场解读</h2></div><span className="source-chip">{analysis.source}{analysis.model ? ` · ${analysis.model}` : ""}</span></div>
+          <div className="section-head"><div><span className="eyebrow">AI RISK BRIEF</span><h2>结构化市场解读</h2></div><span className="source-chip">{analysis.source}{analysis.model ? ` · ${analysis.model}` : ""} · {new Date(analysis.generated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</span></div>
           <div className="ai-copy">{analysis.text}</div>
           <p className="disclaimer">{analysis.disclaimer}</p>
         </section>

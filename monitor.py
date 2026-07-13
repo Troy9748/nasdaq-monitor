@@ -101,6 +101,35 @@ def merge_recent_history(fred: pd.DataFrame, recent: pd.DataFrame) -> pd.DataFra
     return base.sort_index()
 
 
+def build_calibration_audit(stored: pd.DataFrame, fred: pd.DataFrame) -> dict:
+    flags = (
+        stored["Is_Provisional"].astype(bool)
+        if "Is_Provisional" in stored
+        else pd.Series(False, index=stored.index)
+    )
+    provisional = stored[flags]
+    matched = provisional.index.intersection(fred.index)
+    if matched.empty:
+        return {
+            "checked_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+            "corrected_rows": 0,
+            "pending_rows": int(len(provisional)),
+            "max_abs_diff_pct": None,
+            "max_diff_date": None,
+        }
+    differences = (
+        (provisional.loc[matched, "Close"] / fred.loc[matched, "Close"] - 1).abs() * 100
+    )
+    max_date = differences.idxmax()
+    return {
+        "checked_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+        "corrected_rows": int(len(matched)),
+        "pending_rows": int(len(provisional.index.difference(fred.index))),
+        "max_abs_diff_pct": round(float(differences.loc[max_date]), 4),
+        "max_diff_date": max_date.date().isoformat(),
+    }
+
+
 def load_stored_history(path: Path = CSV_PATH) -> pd.DataFrame:
     if not path.exists():
         raise RuntimeError("FRED 不可用且仓库中没有 NASDAQ-100 历史缓存")
@@ -113,22 +142,29 @@ def load_stored_history(path: Path = CSV_PATH) -> pd.DataFrame:
 
 
 def download_history(*, refresh_fred: bool = False) -> pd.DataFrame:
+    stored = load_stored_history() if CSV_PATH.exists() else None
+    audit = None
     if refresh_fred or not CSV_PATH.exists():
         try:
             fred = download_fred_history()
+            if stored is not None:
+                audit = build_calibration_audit(stored, fred)
             print("✅ FRED 权威历史校准完成")
         except Exception as error:
             print(f"⚠️ FRED 暂时不可用，使用仓库中的权威历史缓存: {error}")
             fred = load_stored_history()
     else:
-        fred = load_stored_history()
+        fred = stored
         print("使用仓库中的 FRED 历史基准；本次不执行全量校准")
     try:
-        return merge_recent_history(fred, download_recent_history())
+        result = merge_recent_history(fred, download_recent_history())
     except Exception as error:
         # ponytail: Yahoo 是时效补充源；不可用时保留 FRED，旧日期检查会阻止重复日报。
         print(f"⚠️ Yahoo 最新行情不可用，仅使用 FRED: {error}")
-        return fred
+        result = fred
+    if audit:
+        result.attrs["calibration_audit"] = audit
+    return result
 
 
 def download_fred_context() -> pd.DataFrame:
@@ -201,6 +237,14 @@ def latest_context_value(data: pd.DataFrame, column: str) -> dict | None:
     }
 
 
+def newest_context_value(current: dict | None, cached: dict | None) -> dict | None:
+    if not current:
+        return cached
+    if not cached:
+        return current
+    return cached if cached.get("as_of", "") > current.get("as_of", "") else current
+
+
 def download_components() -> list[str]:
     request = urllib.request.Request(
         NASDAQ_COMPONENTS_URL,
@@ -265,9 +309,12 @@ def build_market_context(*, refresh_fred: bool = False) -> tuple[pd.DataFrame, d
             print(f"⚠️ FRED 市场环境数据不可用，使用缓存: {error}")
     previous = load_previous_context()
     context = {
-        "vxn": latest_context_value(history, "VXN") or previous.get("vxn"),
-        "treasury10y": latest_context_value(history, "Treasury10Y") or previous.get("treasury10y"),
+        "vxn": newest_context_value(latest_context_value(history, "VXN"), previous.get("vxn")),
+        "treasury10y": newest_context_value(
+            latest_context_value(history, "Treasury10Y"), previous.get("treasury10y")
+        ),
         "breadth": previous.get("breadth"),
+        "calibration": previous.get("calibration"),
     }
     breadth_updated = False
     try:
@@ -282,6 +329,20 @@ def build_market_context(*, refresh_fred: bool = False) -> tuple[pd.DataFrame, d
         except Exception as error:
             print(f"⚠️ NASDAQ-100 市场广度不可用，使用缓存: {error}")
     return history, context
+
+
+def annotate_context_freshness(context: dict, market_date) -> dict:
+    result = context.copy()
+    for key in ("vxn", "treasury10y", "breadth"):
+        item = result.get(key)
+        if not item or not item.get("as_of"):
+            continue
+        age = max(0, (market_date - pd.Timestamp(item["as_of"]).date()).days)
+        item = item.copy()
+        item["age_days"] = age
+        item["freshness"] = "正常" if age <= 3 else "延迟" if age <= 5 else "过期"
+        result[key] = item
+    return result
 
 
 def build_freshness(data: pd.DataFrame) -> dict:
@@ -357,6 +418,84 @@ def classify_signal(current: pd.Series, previous: pd.Series) -> tuple[str, str]:
     return "防御阶段", "收盘价位于 EMA200 下方"
 
 
+def regime_series(data: pd.DataFrame) -> pd.Series:
+    regimes = pd.Series(
+        [
+            "未知"
+            if pd.isna(row.EMA50) or pd.isna(row.EMA200)
+            else "防御"
+            if row.Close < row.EMA200
+            else "多头"
+            if row.EMA50 > row.EMA200
+            else "修复"
+            for row in data.itertuples()
+        ],
+        index=data.index,
+        name="Regime",
+    )
+    # ponytail: EMA200 needs 200 sessions before regime statistics are treated as mature.
+    regimes.iloc[:199] = "未知"
+    return regimes
+
+
+def build_regime_analysis(data: pd.DataFrame) -> dict:
+    regimes = regime_series(data)
+    close = data["Close"]
+    horizons = {"20日": 20, "60日": 60, "120日": 120}
+    stats = {}
+    for regime in ("多头", "修复", "防御"):
+        mask = regimes == regime
+        forward = {
+            label: (close.shift(-sessions) / close - 1).where(mask) * 100
+            for label, sessions in horizons.items()
+        }
+        stats[regime] = {
+            "observations": int(mask.sum()),
+            "forward": {
+                label: {
+                    "samples": int(values.count()),
+                    "median_return_pct": _round_optional(float(values.median())),
+                    "positive_rate_pct": _round_optional(float((values.dropna() > 0).mean() * 100)),
+                }
+                for label, values in forward.items()
+            },
+        }
+
+    changes = regimes.ne(regimes.shift())
+    events = [
+        {"date": date.date().isoformat(), "state": state}
+        for date, state in regimes[changes].iloc[-12:].items()
+        if pd.notna(state) and state != "未知"
+    ]
+    return {"current": str(regimes.iloc[-1]), "stats": stats, "recent_events": events}
+
+
+def build_alert(snapshot: dict) -> dict:
+    reasons = []
+    level = "日常"
+    if snapshot["freshness"]["status"] == "严重过期":
+        return {"level": "故障", "code": "critical", "reasons": ["指数行情严重过期"]}
+    if snapshot["status"] in {"转强", "转弱"}:
+        level = "重要"
+        reasons.append(snapshot["status_detail"])
+    context = snapshot.get("context", {})
+    vxn = (context.get("vxn") or {}).get("value")
+    breadth = (context.get("breadth") or {}).get("above_ema200_pct")
+    if vxn is not None and vxn >= 30:
+        reasons.append(f"VXN 升至 {vxn:.2f}")
+    if breadth is not None and breadth < 40:
+        reasons.append(f"市场广度降至 {breadth:.2f}%")
+    if snapshot["volatility20_pct"] is not None and snapshot["volatility20_pct"] >= 35:
+        reasons.append(f"20日年化波动率升至 {snapshot['volatility20_pct']:.2f}%")
+    if reasons and level == "日常":
+        level = "注意"
+    return {
+        "level": level,
+        "code": {"日常": "normal", "注意": "watch", "重要": "important"}[level],
+        "reasons": reasons or ["未触发趋势切换或高风险阈值"],
+    }
+
+
 def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
     latest = data.iloc[-1]
     previous = data.iloc[-2]
@@ -367,7 +506,7 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
     years = max((data.index[-1] - data.index[0]).days / 365.25, 1)
     status, status_detail = classify_signal(latest, previous)
 
-    return {
+    snapshot = {
         "market_date": market_date.isoformat(),
         "close": round(float(latest["Close"]), 2),
         "daily_return_pct": round(float(latest["Daily_Return_Pct"]), 2),
@@ -397,6 +536,8 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
             "provisional_rows": int(data["Is_Provisional"].astype(bool).sum()),
         },
     }
+    snapshot["alert"] = build_alert(snapshot)
+    return snapshot
 
 
 def _round_optional(value: float | None) -> float | None:
@@ -476,6 +617,7 @@ def export_data(
     analysis: dict,
     context_history: pd.DataFrame,
     context: dict,
+    regime_analysis: dict,
 ) -> None:
     WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
     export = data.copy()
@@ -519,6 +661,7 @@ def export_data(
                 "start_date": data.index[0].date().isoformat(),
                 "latest_date": data.index[-1].date().isoformat(),
                 "summary": snapshot,
+                "regime_analysis": regime_analysis,
                 "series": records,
             },
             ensure_ascii=False,
@@ -530,8 +673,27 @@ def export_data(
     WEB_ANALYSIS_PATH.write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
     )
+    aligned = context_history.reindex(data.index).ffill(limit=5) if not context_history.empty else pd.DataFrame(index=data.index)
+    for key, column in (("vxn", "VXN"), ("treasury10y", "Treasury10Y")):
+        item = context.get(key) or {}
+        date = pd.Timestamp(item["as_of"]) if item.get("as_of") else None
+        if date is not None and date in aligned.index:
+            aligned.at[date, column] = item["value"]
+    ndx_returns = data["Close"].pct_change()
+    vxn_changes = aligned.get("VXN", pd.Series(index=data.index, dtype=float)).pct_change()
+    correlation = ndx_returns.rolling(60).corr(vxn_changes)
+    context_series = [
+        {
+            "date": date.date().isoformat(),
+            "vxn": _json_number(aligned.at[date, "VXN"]) if "VXN" in aligned else None,
+            "treasury10y": _json_number(aligned.at[date, "Treasury10Y"]) if "Treasury10Y" in aligned else None,
+            "ndx_vxn_corr60": _json_number(correlation.loc[date]),
+        }
+        for date in data.index
+    ]
     WEB_CONTEXT_PATH.write_text(
-        json.dumps(context, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
+        json.dumps({**context, "series": context_series}, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+        encoding="utf-8",
     )
 
 
@@ -545,7 +707,7 @@ def send_email(snapshot: dict, analysis: dict) -> None:
     password = os.environ["MAIL_PASSWORD"]
     receiver = os.environ["MAIL_RECEIVER"]
     subject = (
-        f"[NDX {snapshot['daily_return_pct']:+.2f}%] NASDAQ-100 日报 "
+        f"[{snapshot['alert']['level']} · NDX {snapshot['daily_return_pct']:+.2f}%] NASDAQ-100 日报 "
         f"{snapshot['market_date']} · {snapshot['status']}"
     )
     context = snapshot.get("context", {})
@@ -560,6 +722,7 @@ def send_email(snapshot: dict, analysis: dict) -> None:
             f"日期：{snapshot['market_date']}",
             f"收盘：{snapshot['close']:.2f}（{snapshot['daily_return_pct']:+.2f}%）",
             f"状态：{snapshot['status']} · {snapshot['status_detail']}",
+            f"提醒：{snapshot['alert']['level']} · {'；'.join(snapshot['alert']['reasons'])}",
             f"EMA50 / EMA200：{snapshot['ema50']:.2f} / {snapshot['ema200']:.2f}",
             f"RSI14 / 20日年化波动率：{snapshot['rsi14']:.2f} / {snapshot['volatility20_pct']:.2f}%",
             f"距52周高点 / 当前回撤：{snapshot['distance_high252_pct']:+.2f}% / {snapshot['drawdown_pct']:.2f}%",
@@ -607,20 +770,41 @@ def job(*, send_mail: bool = True, force: bool = False, refresh_fred: bool = Fal
         return False
 
     context_history, context = build_market_context(refresh_fred=refresh_fred)
+    context = annotate_context_freshness(context, latest_date)
+    if data.attrs.get("calibration_audit"):
+        context["calibration"] = data.attrs["calibration_audit"]
     snapshot = build_snapshot(data, context, freshness)
+    regime_analysis = build_regime_analysis(data)
     context["freshness"] = freshness
     context["provenance"] = snapshot["provenance"]
-    text, source, model = request_ai_analysis(snapshot)
+    previous_analysis = (
+        json.loads(WEB_ANALYSIS_PATH.read_text(encoding="utf-8"))
+        if WEB_ANALYSIS_PATH.exists()
+        else {}
+    )
+    reused_analysis = (
+        not os.getenv("OPENAI_API_KEY")
+        and previous_analysis.get("market_date") == snapshot["market_date"]
+        and previous_analysis.get("source") not in {"规则分析", "规则分析（AI 回退）"}
+    )
+    if reused_analysis:
+        text = previous_analysis["text"]
+        source = previous_analysis["source"]
+        model = previous_analysis.get("model")
+    else:
+        text, source, model = request_ai_analysis(snapshot)
     analysis = {
         "market_date": snapshot["market_date"],
-        "generated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+        "generated_at": previous_analysis["generated_at"]
+        if reused_analysis
+        else datetime.now(ZoneInfo("UTC")).isoformat(),
         "source": source,
         "model": model,
         "text": text,
         "disclaimer": "仅供数据研究与市场观察，不构成投资建议。",
     }
     print(f"✅ 分析来源: {source}" + (f" ({model})" if model else ""))
-    export_data(data, snapshot, analysis, context_history, context)
+    export_data(data, snapshot, analysis, context_history, context, regime_analysis)
     print(f"✅ 已更新至 {latest_date}，共 {len(data)} 个交易日")
     if send_mail:
         send_email(snapshot, analysis)

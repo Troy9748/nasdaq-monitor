@@ -5,7 +5,11 @@ import pandas as pd
 
 from monitor import (
     NEW_YORK,
+    annotate_context_freshness,
+    build_alert,
     build_ai_request,
+    build_calibration_audit,
+    build_regime_analysis,
     calculate_indicators,
     classify_signal,
     download_history,
@@ -61,6 +65,53 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["role"], "user")
         self.assertEqual(payload["thinking"], {"type": "enabled"})
         self.assertEqual(payload["reasoning_effort"], "high")
+
+    def test_fred_calibration_audits_provisional_rows(self):
+        index = pd.to_datetime(["2026-07-10", "2026-07-13"])
+        stored = pd.DataFrame(
+            {"Close": [100.0, 102.0], "Is_Provisional": [False, True]}, index=index
+        )
+        fred = pd.DataFrame({"Close": [101.9]}, index=index[-1:])
+
+        audit = build_calibration_audit(stored, fred)
+
+        self.assertEqual(audit["corrected_rows"], 1)
+        self.assertEqual(audit["max_diff_date"], "2026-07-13")
+        self.assertGreater(audit["max_abs_diff_pct"], 0)
+
+    def test_regime_analysis_has_forward_samples_without_warmup_rows(self):
+        index = pd.bdate_range("2024-01-01", periods=400)
+        data = calculate_indicators(pd.DataFrame({"Close": range(1000, 1400)}, index=index))
+
+        analysis = build_regime_analysis(data)
+
+        self.assertEqual(analysis["current"], "多头")
+        self.assertGreater(analysis["stats"]["多头"]["forward"]["60日"]["samples"], 0)
+        self.assertEqual(
+            sum(value["observations"] for value in analysis["stats"].values()), 201
+        )
+
+    def test_context_freshness_and_alert_level(self):
+        context = annotate_context_freshness(
+            {
+                "vxn": {"value": 35.0, "as_of": "2026-07-10", "source": "FRED"},
+                "breadth": {"above_ema200_pct": 32.0, "as_of": "2026-07-13"},
+            },
+            pd.Timestamp("2026-07-14").date(),
+        )
+        alert = build_alert(
+            {
+                "freshness": {"status": "正常"},
+                "status": "多头趋势",
+                "status_detail": "趋势延续",
+                "volatility20_pct": 20.0,
+                "context": context,
+            }
+        )
+
+        self.assertEqual(context["vxn"]["freshness"], "延迟")
+        self.assertEqual(alert["level"], "注意")
+        self.assertEqual(len(alert["reasons"]), 2)
 
     @patch("monitor.download_recent_history")
     @patch("monitor.load_stored_history")
