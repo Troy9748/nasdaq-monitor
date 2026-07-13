@@ -1,25 +1,31 @@
 {
   "vxn": {
-    "value": 24.89,
-    "as_of": "2026-07-10",
-    "source": "FRED"
+    "value": 27.02,
+    "as_of": "2026-07-13",
+    "source": "Yahoo（临时）"
   },
   "treasury10y": {
-    "value": 4.54,
-    "as_of": "2026-07-09",
-    "source": "FRED"
+    "value": 4.61,
+    "as_of": "2026-07-13",
+    "source": "Yahoo（临时）"
   },
-  "breadth": null,
+  "breadth": {
+    "above_ema200_pct": 65.35,
+    "above_ema200_count": 66,
+    "sample_size": 101,
+    "as_of": "2026-07-13",
+    "source": "Nasdaq 成分名单 + Yahoo 日线"
+  },
   "freshness": {
     "status": "正常",
-    "age_days": 3,
-    "latest_market_date": "2026-07-10",
-    "checked_at": "2026-07-13T17:53:52.340395+00:00"
+    "age_days": 0,
+    "latest_market_date": "2026-07-13",
+    "checked_at": "2026-07-13T18:05:10.660752+00:00"
   },
   "provenance": {
-    "latest_source": "FRED",
-    "latest_is_provisional": false,
+    "latest_source": "Yahoo",
+    "latest_is_provisional": true,
     "authoritative_through": "2026-07-10",
-    "provisional_rows": 0
+    "provisional_rows": 1
   }
 }
