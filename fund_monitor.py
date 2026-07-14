@@ -332,6 +332,20 @@ def keyed_analysis_items(result, key_field: str):
     return []
 
 
+def normalize_sections(value, keys: tuple[str, ...]) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list):
+        return {}
+    output = {}
+    for key, item in zip(keys, value):
+        if isinstance(item, str):
+            output[key] = item
+        elif isinstance(item, dict):
+            output[key] = item.get(key) or item.get("content") or item.get("text") or next((v for v in item.values() if isinstance(v, str)), None)
+    return {key: value for key, value in output.items() if value}
+
+
 def analyze_funds(funds: list[dict]) -> dict[str, dict]:
     fallback = {fund["code"]: deterministic_fund_analysis(fund) for fund in funds}
     for start in range(0, len(funds), DEEPSEEK_FUND_BATCH_SIZE):
@@ -342,11 +356,9 @@ def analyze_funds(funds: list[dict]) -> dict[str, dict]:
             for code, item in keyed_analysis_items(result, "code"):
                 if not isinstance(item, dict):
                     continue
-                sections = item.get("sections")
-                if not isinstance(sections, dict):
-                    continue
+                sections = normalize_sections(item.get("sections"), ("performance", "relative", "holdings", "risks", "watch"))
                 if code in fallback and all(sections.get(key) for key in ("performance", "relative", "holdings", "risks", "watch")):
-                    fallback[code] = {"sections": item["sections"], "evidence": [], "source": "DeepSeek", "error": None}
+                    fallback[code] = {"sections": sections, "evidence": [], "source": "DeepSeek", "error": None}
         except Exception as error:
             for fund in batch:
                 fallback[fund["code"]]["error"] = f"{type(error).__name__}: {error}"
@@ -365,9 +377,7 @@ def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
             for stock_id, item in keyed_analysis_items(result, "stock_id"):
                 if not isinstance(item, dict):
                     continue
-                sections = item.get("sections")
-                if not isinstance(sections, dict):
-                    continue
+                sections = normalize_sections(item.get("sections"), ("event", "financial", "reaction", "risks", "watch"))
                 if stock_id in output and all(sections.get(key) for key in ("event", "financial", "reaction", "risks", "watch")):
                     valid = [index for index in item.get("source_indices") or [] if isinstance(index, int) and 0 <= index < len(compact[stock_id]["news"])]
                     output[stock_id] = {"sections": sections, "source_indices": valid[:5], "source": "DeepSeek", "error": None}
