@@ -342,7 +342,9 @@ def analyze_funds(funds: list[dict]) -> dict[str, dict]:
             for code, item in keyed_analysis_items(result, "code"):
                 if not isinstance(item, dict):
                     continue
-                sections = item.get("sections") or {}
+                sections = item.get("sections")
+                if not isinstance(sections, dict):
+                    continue
                 if code in fallback and all(sections.get(key) for key in ("performance", "relative", "holdings", "risks", "watch")):
                     fallback[code] = {"sections": item["sections"], "evidence": [], "source": "DeepSeek", "error": None}
         except Exception as error:
@@ -363,7 +365,9 @@ def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
             for stock_id, item in keyed_analysis_items(result, "stock_id"):
                 if not isinstance(item, dict):
                     continue
-                sections = item.get("sections") or {}
+                sections = item.get("sections")
+                if not isinstance(sections, dict):
+                    continue
                 if stock_id in output and all(sections.get(key) for key in ("event", "financial", "reaction", "risks", "watch")):
                     valid = [index for index in item.get("source_indices") or [] if isinstance(index, int) and 0 <= index < len(compact[stock_id]["news"])]
                     output[stock_id] = {"sections": sections, "source_indices": valid[:5], "source": "DeepSeek", "error": None}
