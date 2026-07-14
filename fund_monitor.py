@@ -289,6 +289,11 @@ def deepseek_json(system: str, user: dict) -> dict:
                 result = json.load(response)
             content = result["choices"][0]["message"].get("content") or ""
             return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I))
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace")[:1000]
+            if attempt:
+                raise RuntimeError(f"DeepSeek HTTP {error.code}: {detail}") from error
+            time.sleep(3)
         except Exception:
             if attempt:
                 raise
@@ -298,24 +303,26 @@ def deepseek_json(system: str, user: dict) -> dict:
 
 def analyze_funds(funds: list[dict]) -> dict[str, dict]:
     fallback = {fund["code"]: deterministic_fund_analysis(fund) for fund in funds}
-    compact = {fund["code"]: {"name": fund["name"], "sector": SECTOR_NAMES[fund["sector_code"]], "summary": fund["summary"], "holdings": fund["holdings"]} for fund in funds}
-    try:
-        result = deepseek_json("你是基金研究助手。仅依据输入数据，为每只基金返回对象，键为基金代码；每项含sections，固定包含performance、relative、holdings、risks、watch五个简短中文字符串。不得把定期报告持仓称为实时持仓，不给绝对买卖指令，不虚构新闻。", compact)
-        for code, item in result.items():
-            if code in fallback and all((item.get("sections") or {}).get(key) for key in ("performance", "relative", "holdings", "risks", "watch")):
-                fallback[code] = {"sections": item["sections"], "evidence": [], "source": "DeepSeek", "error": None}
-    except Exception as error:
-        for item in fallback.values():
-            item["error"] = f"{type(error).__name__}: {error}"
-        print(f"⚠️ 基金 DeepSeek 分析回退：{error}")
+    for start in range(0, len(funds), 8):
+        batch = funds[start:start + 8]
+        compact = {fund["code"]: {"name": fund["name"], "sector": SECTOR_NAMES[fund["sector_code"]], "summary": fund["summary"], "holdings": fund["holdings"]} for fund in batch}
+        try:
+            result = deepseek_json("你是基金研究助手。仅依据输入数据，为每只基金返回对象，键为基金代码；每项含sections，固定包含performance、relative、holdings、risks、watch五个简短中文字符串。不得把定期报告持仓称为实时持仓，不给绝对买卖指令，不虚构新闻。", compact)
+            for code, item in result.items():
+                if code in fallback and all((item.get("sections") or {}).get(key) for key in ("performance", "relative", "holdings", "risks", "watch")):
+                    fallback[code] = {"sections": item["sections"], "evidence": [], "source": "DeepSeek", "error": None}
+        except Exception as error:
+            for fund in batch:
+                fallback[fund["code"]]["error"] = f"{type(error).__name__}: {error}"
+            print(f"⚠️ 基金 DeepSeek 批次分析回退：{error}")
     return fallback
 
 
 def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
     output = {stock["stock_id"]: deterministic_stock_analysis(stock) for stock in stocks}
     system = "你是上市公司事件研究助手。仅依据输入中的行情、公告新闻标题和财务数据总结。返回对象，键为stock_id；每项含sections(event、financial、reaction、risks、watch)及source_indices。不得虚构事实或来源，不给绝对买卖指令。"
-    for start in range(0, len(stocks), 15):
-        batch = stocks[start:start + 15]
+    for start in range(0, len(stocks), 8):
+        batch = stocks[start:start + 8]
         compact = {stock["stock_id"]: {"name": stock["name"], "summary": stock["summary"], "financial": stock["financial"], "news": stock["news"]} for stock in batch}
         try:
             result = deepseek_json(system, compact)
