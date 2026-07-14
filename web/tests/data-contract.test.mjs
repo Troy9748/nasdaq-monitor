@@ -24,5 +24,6 @@ test("sector monitor exports eight usable core benchmarks", async () => {
   assert.equal(new Set(sectors.indices.map((item) => item.code)).size, 8);
   assert.ok(sectors.indices.every((item) => item.series.length >= 500));
   assert.ok(sectors.indices.every((item) => item.series.at(-1).date === item.latest_date));
+  assert.ok(sectors.indices.filter((item) => /^9/.test(item.code)).every((item) => item.series.at(-1).money_flow_ratio_pct != null));
   assert.equal(analysis.market_date, sectors.latest_a_share_date);
 });

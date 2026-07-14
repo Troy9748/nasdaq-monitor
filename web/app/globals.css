@@ -180,8 +180,16 @@ footer span { margin: 0 8px; }
 .sector-card-head span { color: #687b8e; font: 9px ui-monospace, monospace; }
 .sector-card-head h2 { margin: 5px 0 0; font-size: 16px; }
 .sector-card-head > b { padding-top: 4px; font: 600 18px ui-monospace, monospace; }
-.sector-mini-chart { position: relative; height: 180px; margin-top: 12px; }
-.sector-mini-chart canvas { width: 100%; height: 100%; cursor: crosshair; }
+.mini-controls, .comparison-controls { display: flex; align-items: center; gap: 7px; margin-top: 13px; }
+.mini-controls { overflow-x: auto; scrollbar-width: none; }
+.mini-controls::-webkit-scrollbar { display: none; }
+.mini-controls button, .comparison-controls button { flex: 0 0 auto; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; color: #77899c; background: rgba(5,14,22,.55); font-size: 9px; cursor: pointer; }
+.mini-controls button.active, .comparison-controls button.active, .range-buttons button.active { color: var(--cyan); border-color: rgba(34,211,238,.45); background: rgba(34,211,238,.09); }
+.range-buttons { display: flex; flex: 0 0 auto; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; }
+.range-buttons button { border: 0; background: transparent; }
+.sector-mini-chart { position: relative; height: 180px; margin-top: 8px; }
+.sector-mini-chart.large { height: min(68vh, 720px); min-height: 430px; }
+.sector-mini-chart canvas { width: 100%; height: 100%; cursor: crosshair; touch-action: none; user-select: none; }
 .sector-tooltip, .comparison-tooltip { position: absolute; z-index: 4; display: flex; flex-direction: column; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(5,14,22,.94); box-shadow: 0 10px 30px rgba(0,0,0,.3); pointer-events: none; font: 9px ui-monospace, monospace; }
 .sector-tooltip { top: 5px; right: 5px; }
 .sector-tooltip strong { color: #e2e8f0; }
@@ -189,8 +197,23 @@ footer span { margin: 0 8px; }
 .sector-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 6px; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--line); }
 .sector-stats span { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 9px; color: var(--muted); background: #0a1621; font-size: 8px; }
 .sector-stats strong { overflow: hidden; color: #cbd5e1; font: 600 10px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.sector-stats span:last-child strong { overflow: visible; white-space: normal; }
+.sector-stats small { color: #64768a; font-size: 8px; }
 .sector-source { display: block; margin-top: 10px; color: #54677b; font-size: 8px; }
+.sector-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 7px; color: #65778a; font: 8px ui-monospace, monospace; }
+.sector-legend span { display: flex; align-items: center; gap: 5px; }
+.sector-legend i { width: 13px; height: 2px; border-radius: 2px; background: #94a3b8; }
+.sector-legend .line50 { background: #a78bfa; }
+.sector-legend .line200 { background: #f59e0b; }
+.sector-legend .volume { height: 7px; background: linear-gradient(90deg, rgba(52,211,153,.7) 0 50%, rgba(251,113,133,.7) 50%); }
+.chart-modal { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 22px; background: rgba(2,8,14,.82); backdrop-filter: blur(10px); }
+.chart-modal-card { width: min(1400px, 100%); max-height: calc(100vh - 30px); padding: 22px; overflow: auto; }
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.modal-head span { color: var(--muted); font: 9px ui-monospace, monospace; }
+.modal-head h2 { margin: 5px 0 0; font-size: 20px; }
+.modal-head button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: #aebdca; background: #07111b; cursor: pointer; }
 .comparison-panel { min-width: 0; padding: 24px; }
+.comparison-controls { flex-wrap: wrap; justify-content: flex-end; margin-top: 0; }
 .date-control { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; }
 .date-control input { padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; color: #cbd5e1; background: #07111b; font: 10px ui-monospace, monospace; }
 .index-picker { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 18px 0 10px; }
@@ -198,12 +221,14 @@ footer span { margin: 0 8px; }
 .index-picker input { accent-color: var(--cyan); }
 .index-picker i, .comparison-tooltip i { width: 9px; height: 3px; border-radius: 2px; }
 .comparison-chart { position: relative; height: 480px; }
-.comparison-chart canvas { width: 100%; height: 100%; cursor: crosshair; }
+.comparison-chart canvas { width: 100%; height: 100%; cursor: crosshair; touch-action: none; user-select: none; }
 .comparison-tooltip { top: 8px; right: 8px; min-width: 210px; }
 .comparison-tooltip > strong { margin-bottom: 3px; color: #e2e8f0; }
 .comparison-tooltip span { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 7px; color: #9baabd; }
 .comparison-tooltip b { font-weight: 600; }
 .sector-ai { min-height: 280px; }
+.source-chip.fallback { color: var(--amber); border-color: rgba(245,158,11,.35); }
+.ai-error { margin: 16px 0 0; padding: 10px 12px; border: 1px solid rgba(245,158,11,.25); border-radius: 8px; color: #d8a84e; background: rgba(245,158,11,.06); font-size: 10px; }
 .table-panel td:first-child small { display: block; margin-top: 3px; color: #526578; font-size: 8px; }
 
 @media (max-width: 980px) {
@@ -252,6 +277,14 @@ footer span { margin: 0 8px; }
   .sector-stats { grid-template-columns: repeat(2, 1fr); }
   .comparison-chart { height: 390px; }
   .comparison-tooltip { top: 4px; right: 4px; min-width: 175px; }
+  .mini-controls { margin-right: -2px; }
+  .mini-controls button { padding: 6px 8px; }
+  .sector-mini-chart { height: 220px; }
+  .sector-mini-chart.large { height: 62vh; min-height: 360px; }
+  .chart-modal { padding: 7px; }
+  .chart-modal-card { max-height: calc(100vh - 14px); padding: 14px; }
+  .comparison-controls { width: 100%; justify-content: flex-start; }
+  .sector-tooltip { top: 4px; right: 4px; max-width: 190px; }
 }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }

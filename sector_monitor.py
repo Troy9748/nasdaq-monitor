@@ -318,9 +318,18 @@ def prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
     data["EMA20"] = data["Close"].ewm(span=20, adjust=False).mean()
     if "Amount" in data:
         data["Amount_Ratio20"] = data["Amount"] / data["Amount"].rolling(20).mean()
+        if {"High", "Low"}.issubset(data.columns):
+            spread = (data["High"] - data["Low"]).replace(0, float("nan"))
+            data["Money_Flow_Ratio_Pct"] = ((2 * data["Close"] - data["High"] - data["Low"]) / spread).clip(-1, 1) * 100
+            data["Estimated_Net_Flow"] = data["Amount"] * data["Money_Flow_Ratio_Pct"] / 100
+            data["Estimated_Inflow"] = (data["Amount"] + data["Estimated_Net_Flow"]) / 2
+            data["Estimated_Outflow"] = (data["Amount"] - data["Estimated_Net_Flow"]) / 2
+        else:
+            data[["Money_Flow_Ratio_Pct", "Estimated_Net_Flow", "Estimated_Inflow", "Estimated_Outflow"]] = float("nan")
     else:
         data["Amount"] = float("nan")
         data["Amount_Ratio20"] = float("nan")
+        data[["Money_Flow_Ratio_Pct", "Estimated_Net_Flow", "Estimated_Inflow", "Estimated_Outflow"]] = float("nan")
     return data.round(4)
 
 
@@ -382,6 +391,10 @@ def build_summary(data: pd.DataFrame) -> dict:
         "volatility20_pct": optional_number(latest["Volatility20_Pct"]),
         "amount_billion": optional_number(latest["Amount"] / 1_000_000_000),
         "amount_ratio20": optional_number(latest["Amount_Ratio20"]),
+        "estimated_inflow_billion": optional_number(latest["Estimated_Inflow"] / 1_000_000_000),
+        "estimated_outflow_billion": optional_number(latest["Estimated_Outflow"] / 1_000_000_000),
+        "estimated_net_flow_billion": optional_number(latest["Estimated_Net_Flow"] / 1_000_000_000),
+        "money_flow_ratio_pct": optional_number(latest["Money_Flow_Ratio_Pct"]),
         "trend": trend,
     }
 
@@ -403,8 +416,8 @@ def deterministic_analysis(summaries: dict[str, dict]) -> str:
 
 
 def build_ai_request(summaries: dict[str, dict]) -> tuple[str, dict, str, str]:
-    base_url = (os.getenv("OPENAI_BASE_URL") or "https://api.deepseek.com").rstrip("/")
-    model = os.getenv("OPENAI_MODEL") or "deepseek-v4-pro"
+    base_url = (os.getenv("DEEPSEEK_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.deepseek.com").rstrip("/")
+    model = os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-pro"
     provider = "DeepSeek" if "api.deepseek.com" in base_url else "OpenAI"
     compact = {
         code: {"name": INDEXES[code]["name"], **summary} for code, summary in summaries.items()
@@ -431,10 +444,10 @@ def build_ai_request(summaries: dict[str, dict]) -> tuple[str, dict, str, str]:
     return f"{base_url}/chat/completions", payload, model, provider
 
 
-def request_ai_analysis(summaries: dict[str, dict]) -> tuple[str, str, str | None]:
-    api_key = os.getenv("OPENAI_API_KEY")
+def request_ai_analysis(summaries: dict[str, dict]) -> tuple[str, str, str | None, str | None]:
+    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        return deterministic_analysis(summaries), "规则分析", None
+        return deterministic_analysis(summaries), "规则分析（等待 DeepSeek）", None, "GitHub 尚未配置可用的 DeepSeek API Key"
     url, payload, model, provider = build_ai_request(summaries)
     request = urllib.request.Request(
         url,
@@ -448,10 +461,10 @@ def request_ai_analysis(summaries: dict[str, dict]) -> tuple[str, str, str | Non
         text = result["choices"][0]["message"]["content"].strip()
         if not text:
             raise RuntimeError("AI响应为空")
-        return text, provider, model
+        return text, provider, model, None
     except (OSError, urllib.error.HTTPError, ValueError, KeyError, RuntimeError) as error:
         print(f"⚠️ 板块AI分析不可用，使用规则分析：{error}")
-        return deterministic_analysis(summaries), "规则分析（AI回退）", model
+        return deterministic_analysis(summaries), "规则分析（DeepSeek 回退）", model, f"{type(error).__name__}: {error}"
 
 
 def export_data(frames: dict[str, pd.DataFrame], summaries: dict[str, dict], analysis: dict) -> None:
@@ -468,6 +481,10 @@ def export_data(frames: dict[str, pd.DataFrame], summaries: dict[str, dict], ana
         "Volatility20_Pct",
         "Amount",
         "Amount_Ratio20",
+        "Estimated_Inflow",
+        "Estimated_Outflow",
+        "Estimated_Net_Flow",
+        "Money_Flow_Ratio_Pct",
     ]
     for code, data in frames.items():
         csv = data.copy()
@@ -487,6 +504,10 @@ def export_data(frames: dict[str, pd.DataFrame], summaries: dict[str, dict], ana
                 "volatility20_pct": optional_number(row["Volatility20_Pct"], 4),
                 "amount_billion": optional_number(row["Amount"] / 1_000_000_000, 4),
                 "amount_ratio20": optional_number(row["Amount_Ratio20"], 4),
+                "estimated_inflow_billion": optional_number(row["Estimated_Inflow"] / 1_000_000_000, 4),
+                "estimated_outflow_billion": optional_number(row["Estimated_Outflow"] / 1_000_000_000, 4),
+                "estimated_net_flow_billion": optional_number(row["Estimated_Net_Flow"] / 1_000_000_000, 4),
+                "money_flow_ratio_pct": optional_number(row["Money_Flow_Ratio_Pct"], 4),
             }
             for date, row in data[fields].iterrows()
         ]
@@ -544,12 +565,14 @@ def job(*, force: bool = False) -> bool:
     if not force and previous_date and latest_a_share_date <= previous_date:
         print(f"没有新的A股交易日（最新 {latest_a_share_date}），跳过分析和提交")
         return False
-    text, source, model = request_ai_analysis(summaries)
+    text, source, model, ai_error = request_ai_analysis(summaries)
     analysis = {
         "market_date": latest_a_share_date,
         "generated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
         "source": source,
         "model": model,
+        "status": "ok" if ai_error is None else "fallback",
+        "error": ai_error,
         "text": text,
         "disclaimer": "仅供数据研究与板块观察，不构成投资建议。",
     }

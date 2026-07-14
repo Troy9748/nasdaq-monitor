@@ -11,6 +11,8 @@ class SectorMonitorTest(unittest.TestCase):
         dates = pd.bdate_range("2023-01-02", periods=260)
         frame = pd.DataFrame(
             {
+                "High": range(1010, 1270),
+                "Low": range(990, 1250),
                 "Close": range(1000, 1260),
                 "Amount": [1_000_000_000] * 260,
             },
@@ -18,6 +20,9 @@ class SectorMonitorTest(unittest.TestCase):
         )
         summary = build_summary(prepare_frame(frame))
         self.assertAlmostEqual(summary["amount_ratio20"], 1)
+        self.assertAlmostEqual(summary["estimated_inflow_billion"], 0.5)
+        self.assertAlmostEqual(summary["estimated_outflow_billion"], 0.5)
+        self.assertAlmostEqual(summary["money_flow_ratio_pct"], 0)
         self.assertGreater(summary["ema20"], summary["ema50"])
         self.assertEqual(summary["trend"], "多头排列")
 
