@@ -1,0 +1,39 @@
+name: Daily Holdings Sector Check
+
+on:
+  schedule:
+    # 北京时间工作日 16:10 首次更新，18:10 再补一次晚到数据；脚本会跳过重复交易日。
+    - cron: "10 8 * * 1-5"
+    - cron: "10 10 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: holdings-sector-daily
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Update sector data and analysis (no email)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
+        run: python -u sector_monitor.py
+      - name: Commit a new market day
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sector_indices_daily.csv web/public/data/sector_indices_daily.csv web/public/data/sectors.json web/public/data/sector_analysis.json
+          git diff --cached --quiet || git commit -m "Auto-update: holdings sector indices"
+          git push

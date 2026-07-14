@@ -11,8 +11,8 @@ export const metadata: Metadata = {
   title,
   description,
   icons: { icon: `${basePath}/favicon.svg` },
-  openGraph: { title, description, images: [{ url: `${siteUrl}/og.png`, width: 1200, height: 630 }] },
-  twitter: { card: "summary_large_image", title, description, images: [`${siteUrl}/og.png`] },
+  openGraph: { title, description, images: [{ url: `${siteUrl}/og-v2.png`, width: 1200, height: 630 }] },
+  twitter: { card: "summary_large_image", title, description, images: [`${siteUrl}/og-v2.png`] },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

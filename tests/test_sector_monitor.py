@@ -1,0 +1,37 @@
+import os
+import unittest
+
+import pandas as pd
+
+from sector_monitor import build_ai_request, build_summary, prepare_frame
+
+
+class SectorMonitorTest(unittest.TestCase):
+    def test_indicators_and_summary_are_continuous(self):
+        dates = pd.bdate_range("2023-01-02", periods=260)
+        frame = pd.DataFrame(
+            {
+                "Close": range(1000, 1260),
+                "Amount": [1_000_000_000] * 260,
+            },
+            index=dates,
+        )
+        summary = build_summary(prepare_frame(frame))
+        self.assertAlmostEqual(summary["amount_ratio20"], 1)
+        self.assertGreater(summary["ema20"], summary["ema50"])
+        self.assertEqual(summary["trend"], "多头排列")
+
+    def test_deepseek_request_enables_thinking(self):
+        old = os.environ.pop("OPENAI_BASE_URL", None)
+        try:
+            _, payload, _, provider = build_ai_request({})
+        finally:
+            if old is not None:
+                os.environ["OPENAI_BASE_URL"] = old
+        self.assertEqual(provider, "DeepSeek")
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+        self.assertEqual(payload["reasoning_effort"], "high")
+
+
+if __name__ == "__main__":
+    unittest.main()

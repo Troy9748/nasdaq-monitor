@@ -13,4 +13,6 @@ test("GitHub Pages output uses the repository base path and ships data", async (
   assert.match(index, /\/nasdaq-monitor\/favicon\.svg/);
   assert.match(script, /\/nasdaq-monitor/);
   await assert.doesNotReject(() => readFile(new URL("data/nasdaq100.json", output)));
+  await assert.doesNotReject(() => readFile(new URL("sectors.html", output)));
+  await assert.doesNotReject(() => readFile(new URL("data/sectors.json", output)));
 });

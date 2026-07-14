@@ -17,3 +17,12 @@ test("generated data satisfies the dashboard contract", async () => {
   assert.equal(context.series.at(-1).date, market.latest_date);
   assert.equal(analysis.market_date, market.latest_date);
 });
+
+test("sector monitor exports eight usable core benchmarks", async () => {
+  const [sectors, analysis] = await Promise.all([readJson("sectors.json"), readJson("sector_analysis.json")]);
+  assert.equal(sectors.indices.length, 8);
+  assert.equal(new Set(sectors.indices.map((item) => item.code)).size, 8);
+  assert.ok(sectors.indices.every((item) => item.series.length >= 500));
+  assert.ok(sectors.indices.every((item) => item.series.at(-1).date === item.latest_date));
+  assert.equal(analysis.market_date, sectors.latest_a_share_date);
+});

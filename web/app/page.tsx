@@ -403,7 +403,7 @@ export default function Home() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark">N</span><div><strong>NDX SIGNAL DESK</strong><small>NASDAQ-100 MARKET INTELLIGENCE</small></div></div>
         <div className="market-stamp"><span className={`live-dot ${summary.freshness.status !== "正常" ? "warn" : ""}`} />数据截至 {summary.market_date}<span>·</span>{summary.freshness.status}<span className={`alert-chip ${summary.alert.code}`}>{summary.alert.level}</span></div>
-        <a className="download" href={assetPath("/data/nasdaq100_daily_data.csv")} download>下载完整 CSV</a>
+        <nav className="top-actions"><a className="download" href={assetPath(`/sectors${basePath ? ".html" : ""}`)}>持仓板块</a><a className="download" href={assetPath("/data/nasdaq100_daily_data.csv")} download>下载完整 CSV</a></nav>
       </header>
 
       <div className="dashboard">
