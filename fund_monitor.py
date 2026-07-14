@@ -26,6 +26,8 @@ DATA_DIR = Path("web/public/data")
 FUND_DIR = DATA_DIR / "funds"
 STOCK_DIR = DATA_DIR / "stocks"
 CATALOG_PATH = DATA_DIR / "funds.json"
+DEEPSEEK_BATCH_SIZE = int(os.getenv("DEEPSEEK_BATCH_SIZE") or "24")
+DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("DEEPSEEK_TIMEOUT_SECONDS") or "90")
 
 FUND_SECTORS = {
     "017641": "SPX", "016665": "SPX", "270023": "SPX", "022184": "SPX", "005698": "SPX",
@@ -282,20 +284,21 @@ def deepseek_json(system: str, user: dict) -> dict:
     base = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
     payload = {"model": os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-pro", "messages": [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}], "response_format": {"type": "json_object"}, "thinking": {"type": "enabled"}, "reasoning_effort": "high", "max_tokens": 6000, "stream": False}
     body = json.dumps(payload).encode()
-    for attempt in range(2):
+    attempts = 1
+    for attempt in range(attempts):
         try:
             request = urllib.request.Request(f"{base}/chat/completions", data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(request, timeout=300) as response:
+            with urllib.request.urlopen(request, timeout=DEEPSEEK_TIMEOUT_SECONDS) as response:
                 result = json.load(response)
             content = result["choices"][0]["message"].get("content") or ""
             return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I))
         except urllib.error.HTTPError as error:
             detail = error.read().decode(errors="replace")[:1000]
-            if attempt:
+            if attempt == attempts - 1:
                 raise RuntimeError(f"DeepSeek HTTP {error.code}: {detail}") from error
             time.sleep(3)
         except Exception:
-            if attempt:
+            if attempt == attempts - 1:
                 raise
             time.sleep(3)
     raise RuntimeError("DeepSeek returned no result")
@@ -303,8 +306,8 @@ def deepseek_json(system: str, user: dict) -> dict:
 
 def analyze_funds(funds: list[dict]) -> dict[str, dict]:
     fallback = {fund["code"]: deterministic_fund_analysis(fund) for fund in funds}
-    for start in range(0, len(funds), 8):
-        batch = funds[start:start + 8]
+    for start in range(0, len(funds), DEEPSEEK_BATCH_SIZE):
+        batch = funds[start:start + DEEPSEEK_BATCH_SIZE]
         compact = {fund["code"]: {"name": fund["name"], "sector": SECTOR_NAMES[fund["sector_code"]], "summary": fund["summary"], "holdings": fund["holdings"]} for fund in batch}
         try:
             result = deepseek_json("你是基金研究助手。仅依据输入数据，只返回JSON对象，键为基金代码；每项含sections，固定包含performance、relative、holdings、risks、watch五个简短中文字符串。不得把定期报告持仓称为实时持仓，不给绝对买卖指令，不虚构新闻。", compact)
@@ -321,8 +324,8 @@ def analyze_funds(funds: list[dict]) -> dict[str, dict]:
 def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
     output = {stock["stock_id"]: deterministic_stock_analysis(stock) for stock in stocks}
     system = "你是上市公司事件研究助手。仅依据输入中的行情、公告新闻标题和财务数据总结。只返回JSON对象，键为stock_id；每项含sections(event、financial、reaction、risks、watch)及source_indices。不得虚构事实或来源，不给绝对买卖指令。"
-    for start in range(0, len(stocks), 8):
-        batch = stocks[start:start + 8]
+    for start in range(0, len(stocks), DEEPSEEK_BATCH_SIZE):
+        batch = stocks[start:start + DEEPSEEK_BATCH_SIZE]
         compact = {stock["stock_id"]: {"name": stock["name"], "summary": stock["summary"], "financial": stock["financial"], "news": stock["news"]} for stock in batch}
         try:
             result = deepseek_json(system, compact)
