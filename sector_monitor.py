@@ -24,6 +24,8 @@ WEB_DATA_DIR = Path("web/public/data")
 WEB_JSON_PATH = WEB_DATA_DIR / "sectors.json"
 WEB_ANALYSIS_PATH = WEB_DATA_DIR / "sector_analysis.json"
 WEB_CSV_PATH = WEB_DATA_DIR / CSV_PATH.name
+WEB_SERIES_DIR = WEB_DATA_DIR / "sectors"
+DOWNLOAD_STATUS: dict[str, str] = {}
 
 CSI_URL = "https://www.csindex.com.cn/csindex-home/perf/index-perf"
 CNI_URL = "https://hq.cnindex.com.cn/market/market/getIndexDailyDataWithDataFormat"
@@ -36,6 +38,7 @@ INDEXES = {
         "category": "国产芯片上游",
         "source": "中证指数",
         "provider": "csi",
+        "calendar": "A股",
         "base_date": "2018-12-28",
         "color": "#22d3ee",
     },
@@ -44,6 +47,7 @@ INDEXES = {
         "category": "CPO · 光模块 · 通信",
         "source": "中证指数",
         "provider": "csi",
+        "calendar": "A股",
         "base_date": "2004-12-31",
         "color": "#a78bfa",
     },
@@ -52,6 +56,7 @@ INDEXES = {
         "category": "AI全产业链",
         "source": "中证指数",
         "provider": "csi",
+        "calendar": "A股",
         "base_date": "2012-06-29",
         "color": "#38bdf8",
     },
@@ -60,6 +65,7 @@ INDEXES = {
         "category": "动力电池 · 储能",
         "source": "中证指数",
         "provider": "csi",
+        "calendar": "A股",
         "base_date": "2014-12-31",
         "color": "#34d399",
     },
@@ -68,6 +74,7 @@ INDEXES = {
         "category": "稀土 · 工业金属 · 矿业",
         "source": "中证指数",
         "provider": "csi",
+        "calendar": "A股",
         "base_date": "2013-12-31",
         "color": "#f59e0b",
     },
@@ -76,6 +83,7 @@ INDEXES = {
         "category": "机器人 · 自动化",
         "source": "国证指数",
         "provider": "cni",
+        "calendar": "A股",
         "base_date": "2014-12-31",
         "color": "#fb7185",
     },
@@ -84,6 +92,7 @@ INDEXES = {
         "category": "人民币黄金",
         "source": "上海黄金交易所",
         "provider": "sge",
+        "calendar": "上海黄金交易所",
         "base_date": "2016-04-18",
         "color": "#facc15",
     },
@@ -92,6 +101,7 @@ INDEXES = {
         "category": "美国大盘",
         "source": "Yahoo Finance（S&P 500）",
         "provider": "yahoo",
+        "calendar": "美股",
         "base_date": "1928-01-03",
         "color": "#60a5fa",
     },
@@ -303,11 +313,13 @@ def download_all() -> dict[str, pd.DataFrame]:
                 frame = download_sge()
             else:
                 frame = download_spx()
+            DOWNLOAD_STATUS[code] = "official"
             print(f"✅ {config['name']}：{frame.index[0].date()} 至 {frame.index[-1].date()}")
         except Exception as error:
             if code not in cached:
                 raise
             print(f"⚠️ {config['name']} 下载失败，保留历史缓存：{error}")
+            DOWNLOAD_STATUS[code] = "cached"
             frame = cached[code]
         result[code] = frame
     return result
@@ -324,12 +336,18 @@ def prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
             data["Estimated_Net_Flow"] = data["Amount"] * data["Money_Flow_Ratio_Pct"] / 100
             data["Estimated_Inflow"] = (data["Amount"] + data["Estimated_Net_Flow"]) / 2
             data["Estimated_Outflow"] = (data["Amount"] - data["Estimated_Net_Flow"]) / 2
+            for sessions in (5, 20):
+                rolling_amount = data["Amount"].rolling(sessions, min_periods=sessions).sum()
+                rolling_net = data["Estimated_Net_Flow"].rolling(sessions, min_periods=sessions).sum()
+                data[f"Estimated_Net_Flow_{sessions}"] = rolling_net
+                data[f"Money_Flow_Ratio_{sessions}_Pct"] = rolling_net / rolling_amount * 100
+            data["Flow_Confidence_Pct"] = (data["Amount_Ratio20"] * 100).clip(0, 100)
         else:
-            data[["Money_Flow_Ratio_Pct", "Estimated_Net_Flow", "Estimated_Inflow", "Estimated_Outflow"]] = float("nan")
+            data[["Money_Flow_Ratio_Pct", "Estimated_Net_Flow", "Estimated_Inflow", "Estimated_Outflow", "Estimated_Net_Flow_5", "Estimated_Net_Flow_20", "Money_Flow_Ratio_5_Pct", "Money_Flow_Ratio_20_Pct", "Flow_Confidence_Pct"]] = float("nan")
     else:
         data["Amount"] = float("nan")
         data["Amount_Ratio20"] = float("nan")
-        data[["Money_Flow_Ratio_Pct", "Estimated_Net_Flow", "Estimated_Inflow", "Estimated_Outflow"]] = float("nan")
+        data[["Money_Flow_Ratio_Pct", "Estimated_Net_Flow", "Estimated_Inflow", "Estimated_Outflow", "Estimated_Net_Flow_5", "Estimated_Net_Flow_20", "Money_Flow_Ratio_5_Pct", "Money_Flow_Ratio_20_Pct", "Flow_Confidence_Pct"]] = float("nan")
     return data.round(4)
 
 
@@ -395,23 +413,102 @@ def build_summary(data: pd.DataFrame) -> dict:
         "estimated_outflow_billion": optional_number(latest["Estimated_Outflow"] / 1_000_000_000),
         "estimated_net_flow_billion": optional_number(latest["Estimated_Net_Flow"] / 1_000_000_000),
         "money_flow_ratio_pct": optional_number(latest["Money_Flow_Ratio_Pct"]),
+        "estimated_net_flow_5_billion": optional_number(latest["Estimated_Net_Flow_5"] / 1_000_000_000),
+        "estimated_net_flow_20_billion": optional_number(latest["Estimated_Net_Flow_20"] / 1_000_000_000),
+        "money_flow_ratio_5_pct": optional_number(latest["Money_Flow_Ratio_5_Pct"]),
+        "money_flow_ratio_20_pct": optional_number(latest["Money_Flow_Ratio_20_Pct"]),
+        "flow_confidence_pct": optional_number(latest["Flow_Confidence_Pct"]),
         "trend": trend,
     }
 
 
-def deterministic_analysis(summaries: dict[str, dict]) -> str:
+SECTION_LABELS = {
+    "today": "今日强弱",
+    "rotation": "主线与轮动",
+    "confirmation": "趋势与成交验证",
+    "risks": "主要风险",
+    "next": "下一交易日观察",
+}
+METRIC_LABELS = {
+    "daily_return_pct": "当日涨跌",
+    "returns.five_days": "5日涨跌",
+    "returns.twenty_days": "20日涨跌",
+    "returns.sixty_days": "60日涨跌",
+    "returns.ytd": "今年以来",
+    "distance_ema200_pct": "距EMA200",
+    "rsi14": "RSI14",
+    "volatility20_pct": "20日波动率",
+    "amount_ratio20": "成交活跃度",
+    "money_flow_ratio_5_pct": "5日成交方向",
+    "money_flow_ratio_20_pct": "20日成交方向",
+    "flow_confidence_pct": "活跃度可信参考",
+    "trend": "均线结构",
+}
+
+
+def metric_value(summary: dict, metric: str):
+    value = summary
+    for key in metric.split("."):
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    return value
+
+
+def make_analysis_bundle(sections: dict[str, str], evidence_requests: list[dict], summaries: dict[str, dict]) -> dict:
+    clean_sections = {key: str(sections.get(key) or "").strip() for key in SECTION_LABELS}
+    if any(not value for value in clean_sections.values()):
+        raise ValueError("AI结构化分析缺少段落")
+    names = [config["name"] for config in INDEXES.values()]
+    for value in clean_sections.values():
+        for name in names:
+            value = value.replace(name, "")
+        if re.search(r"\d", value):
+            raise ValueError("AI定性正文不得包含未经后端校验的数字")
+    evidence = []
+    seen = set()
+    for item in evidence_requests:
+        code, metric = str(item.get("code") or ""), str(item.get("metric") or "")
+        if code not in summaries or metric not in METRIC_LABELS or (code, metric) in seen:
+            continue
+        value = metric_value(summaries[code], metric)
+        if value is None:
+            continue
+        seen.add((code, metric))
+        evidence.append(
+            {
+                "code": code,
+                "name": INDEXES[code]["name"],
+                "metric": metric,
+                "label": METRIC_LABELS[metric],
+                "value": value,
+            }
+        )
+    text = "\n\n".join(f"{SECTION_LABELS[key]}：{clean_sections[key]}" for key in SECTION_LABELS)
+    return {"sections": clean_sections, "evidence": evidence[:12], "text": text}
+
+
+def deterministic_analysis(summaries: dict[str, dict]) -> dict:
     ranked = sorted(
         summaries.items(), key=lambda item: item[1].get("daily_return_pct") or -999, reverse=True
     )
     leader, laggard = ranked[0], ranked[-1]
     strong = [INDEXES[code]["name"] for code, value in summaries.items() if value["trend"] == "多头排列"]
-    return "\n\n".join(
+    sections = {
+        "today": f"{INDEXES[leader[0]]['name']}领涨，{INDEXES[laggard[0]]['name']}相对落后。",
+        "rotation": f"当前多头排列板块为{'、'.join(strong) if strong else '暂无'}。",
+        "confirmation": "优先观察价格、均线和成交活跃度是否同步确认；资金方向字段仅为成交额方向估算。",
+        "risks": "单日反弹且成交额低于近期均值时，不直接视为趋势确认。",
+        "next": "关注领涨板块能否维持均线结构及短中期成交方向的一致性。仅作数据观察，不构成投资建议。",
+    }
+    return make_analysis_bundle(
+        sections,
         [
-            f"今日强弱：{INDEXES[leader[0]]['name']}领涨 {leader[1]['daily_return_pct']:+.2f}%，"
-            f"{INDEXES[laggard[0]]['name']}相对落后 {laggard[1]['daily_return_pct']:+.2f}%。",
-            f"趋势结构：当前多头排列板块为{'、'.join(strong) if strong else '暂无'}。",
-            "观察建议：优先观察领涨板块能否在成交活跃度提升时维持均线结构；若仅价格上涨而成交额低于20日均值，避免把单日反弹直接视为趋势确认。仅作数据观察，不构成投资建议。",
-        ]
+            {"code": leader[0], "metric": "daily_return_pct"},
+            {"code": laggard[0], "metric": "daily_return_pct"},
+            {"code": leader[0], "metric": "amount_ratio20"},
+        ],
+        summaries,
     )
 
 
@@ -429,7 +526,9 @@ def build_ai_request(summaries: dict[str, dict]) -> tuple[str, dict, str, str]:
                 "role": "system",
                 "content": (
                     "你是审慎的跨板块市场数据分析员，只能使用给定指数数据，不得虚构新闻或资金流向。"
-                    "用中文输出五个短段落：今日强弱、主线与轮动、趋势与成交验证、主要风险、下一交易日条件式观察建议。"
+                    "只返回JSON对象：sections必须包含today、rotation、confirmation、risks、next五个非空中文字符串；"
+                    "evidence为3至12项数组，每项只能含code和metric，用于选择支撑结论的原始数据。"
+                    f"metric只能取：{','.join(METRIC_LABELS)}。sections只写定性结论，严禁出现阿拉伯数字或百分比；所有数值只通过evidence选择，由后端挂载真实值。"
                     "estimated_* 与 money_flow_ratio_pct 只是依据收盘在日内高低区间位置拆分成交额的方向估算，"
                     "严禁称为主力资金、真实资金、真实净流入或资金流指标，只能称为资金方向估算或成交额方向估算。"
                     "明确区分成交活跃度与真实资金净流入，不给绝对买卖指令，结尾注明不构成投资建议。"
@@ -439,6 +538,7 @@ def build_ai_request(summaries: dict[str, dict]) -> tuple[str, dict, str, str]:
         ],
         "max_tokens": 6000,
         "stream": False,
+        "response_format": {"type": "json_object"},
     }
     if provider == "DeepSeek":
         payload["thinking"] = {"type": "enabled"}
@@ -446,7 +546,7 @@ def build_ai_request(summaries: dict[str, dict]) -> tuple[str, dict, str, str]:
     return f"{base_url}/chat/completions", payload, model, provider
 
 
-def request_ai_analysis(summaries: dict[str, dict]) -> tuple[str, str, str | None, str | None]:
+def request_ai_analysis(summaries: dict[str, dict]) -> tuple[dict, str, str | None, str | None]:
     api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         return deterministic_analysis(summaries), "规则分析（等待 DeepSeek）", None, "GitHub 尚未配置可用的 DeepSeek API Key"
@@ -463,7 +563,13 @@ def request_ai_analysis(summaries: dict[str, dict]) -> tuple[str, str, str | Non
                 result = json.load(response)
             text = (result["choices"][0]["message"].get("content") or "").strip()
             if text:
-                return text, provider, model, None
+                try:
+                    clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+                    parsed = json.loads(clean)
+                    return make_analysis_bundle(parsed.get("sections") or {}, parsed.get("evidence") or [], summaries), provider, model, None
+                except (ValueError, KeyError) as error:
+                    print(f"⚠️ DeepSeek 第 {attempt + 1} 次结构校验失败，重试：{error}")
+                    continue
             print(f"⚠️ DeepSeek 第 {attempt + 1} 次未返回最终正文，重试")
         raise RuntimeError("DeepSeek 连续两次未返回最终正文")
     except (OSError, urllib.error.HTTPError, ValueError, KeyError, RuntimeError) as error:
@@ -473,6 +579,7 @@ def request_ai_analysis(summaries: dict[str, dict]) -> tuple[str, str, str | Non
 
 def export_data(frames: dict[str, pd.DataFrame], summaries: dict[str, dict], analysis: dict) -> None:
     WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    WEB_SERIES_DIR.mkdir(parents=True, exist_ok=True)
     csv_frames = []
     indices = []
     fields = [
@@ -489,6 +596,11 @@ def export_data(frames: dict[str, pd.DataFrame], summaries: dict[str, dict], ana
         "Estimated_Outflow",
         "Estimated_Net_Flow",
         "Money_Flow_Ratio_Pct",
+        "Estimated_Net_Flow_5",
+        "Estimated_Net_Flow_20",
+        "Money_Flow_Ratio_5_Pct",
+        "Money_Flow_Ratio_20_Pct",
+        "Flow_Confidence_Pct",
     ]
     for code, data in frames.items():
         csv = data.copy()
@@ -512,17 +624,36 @@ def export_data(frames: dict[str, pd.DataFrame], summaries: dict[str, dict], ana
                 "estimated_outflow_billion": optional_number(row["Estimated_Outflow"] / 1_000_000_000, 4),
                 "estimated_net_flow_billion": optional_number(row["Estimated_Net_Flow"] / 1_000_000_000, 4),
                 "money_flow_ratio_pct": optional_number(row["Money_Flow_Ratio_Pct"], 4),
+                "estimated_net_flow_5_billion": optional_number(row["Estimated_Net_Flow_5"] / 1_000_000_000, 4),
+                "estimated_net_flow_20_billion": optional_number(row["Estimated_Net_Flow_20"] / 1_000_000_000, 4),
+                "money_flow_ratio_5_pct": optional_number(row["Money_Flow_Ratio_5_Pct"], 4),
+                "money_flow_ratio_20_pct": optional_number(row["Money_Flow_Ratio_20_Pct"], 4),
+                "flow_confidence_pct": optional_number(row["Flow_Confidence_Pct"], 4),
             }
             for date, row in data[fields].iterrows()
         ]
+        quality = {
+            "status": DOWNLOAD_STATUS.get(code, "unknown"),
+            "age_days": max(0, (datetime.now(SHANGHAI).date() - data.index[-1].date()).days),
+            "has_amount": summaries[code]["amount_billion"] is not None,
+            "calendar": INDEXES[code]["calendar"],
+            "note": "官方源本次更新" if DOWNLOAD_STATUS.get(code) == "official" else "本次下载失败，沿用仓库缓存",
+        }
+        history_path = f"/data/sectors/{code}.json"
+        (WEB_SERIES_DIR / f"{code}.json").write_text(
+            json.dumps({"code": code, "series": series}, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+            encoding="utf-8",
+        )
         indices.append(
             {
                 "code": code,
-                **{key: INDEXES[code][key] for key in ("name", "category", "source", "color")},
+                **{key: INDEXES[code][key] for key in ("name", "category", "source", "color", "calendar")},
                 "start_date": data.index[0].date().isoformat(),
                 "latest_date": data.index[-1].date().isoformat(),
+                "history_path": history_path,
+                "quality": quality,
                 "summary": summaries[code],
-                "series": series,
+                "series": series[-252:],
             }
         )
     combined = pd.concat(csv_frames, ignore_index=True)
@@ -569,7 +700,7 @@ def job(*, force: bool = False) -> bool:
     if not force and previous_date and latest_a_share_date <= previous_date:
         print(f"没有新的A股交易日（最新 {latest_a_share_date}），跳过分析和提交")
         return False
-    text, source, model, ai_error = request_ai_analysis(summaries)
+    bundle, source, model, ai_error = request_ai_analysis(summaries)
     analysis = {
         "market_date": latest_a_share_date,
         "generated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
@@ -577,7 +708,7 @@ def job(*, force: bool = False) -> bool:
         "model": model,
         "status": "ok" if ai_error is None else "fallback",
         "error": ai_error,
-        "text": text,
+        **bundle,
         "disclaimer": "仅供数据研究与板块观察，不构成投资建议。",
     }
     export_data(frames, summaries, analysis)

@@ -22,8 +22,14 @@ test("sector monitor exports eight usable core benchmarks", async () => {
   const [sectors, analysis] = await Promise.all([readJson("sectors.json"), readJson("sector_analysis.json")]);
   assert.equal(sectors.indices.length, 8);
   assert.equal(new Set(sectors.indices.map((item) => item.code)).size, 8);
-  assert.ok(sectors.indices.every((item) => item.series.length >= 500));
+  assert.ok(sectors.indices.every((item) => item.series.length > 200 && item.series.length <= 252));
   assert.ok(sectors.indices.every((item) => item.series.at(-1).date === item.latest_date));
+  assert.ok(sectors.indices.every((item) => item.history_path && item.quality?.calendar));
   assert.ok(sectors.indices.filter((item) => /^9/.test(item.code)).every((item) => item.series.at(-1).money_flow_ratio_pct != null));
+  const histories = await Promise.all(sectors.indices.map((item) => readJson(`sectors/${item.code}.json`)));
+  assert.ok(histories.every((item) => item.series.length >= 500));
+  assert.ok(histories.every((item, index) => item.series.at(-1).date === sectors.indices[index].latest_date));
   assert.equal(analysis.market_date, sectors.latest_a_share_date);
+  assert.deepEqual(Object.keys(analysis.sections).sort(), ["confirmation", "next", "risks", "rotation", "today"]);
+  assert.ok(Array.isArray(analysis.evidence));
 });
