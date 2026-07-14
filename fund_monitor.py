@@ -283,7 +283,7 @@ def deepseek_json(system: str, user: dict) -> dict:
     if not api_key:
         raise RuntimeError("missing DeepSeek API key")
     base = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
-    payload = {"model": os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-pro", "messages": [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}], "response_format": {"type": "json_object"}, "thinking": {"type": "enabled"}, "reasoning_effort": "high", "max_tokens": 6000, "stream": False}
+    payload = {"model": os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-flash", "messages": [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}], "response_format": {"type": "json_object"}, "thinking": {"type": "enabled"}, "reasoning_effort": "high", "max_tokens": 6000, "stream": False}
     body = json.dumps(payload).encode()
     attempts = 1
     for attempt in range(attempts):

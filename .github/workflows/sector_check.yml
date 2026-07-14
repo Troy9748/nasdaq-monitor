@@ -32,7 +32,7 @@ jobs:
       - name: Update sector data and analysis (no email)
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
-          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-v4-pro' }}
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-v4-flash' }}
           DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL || vars.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
         run: python -u sector_monitor.py ${{ github.event_name == 'push' && '--force' || '' }}
       - name: Commit a new market day
