@@ -29,6 +29,7 @@ CATALOG_PATH = DATA_DIR / "funds.json"
 DEEPSEEK_FUND_BATCH_SIZE = int(os.getenv("DEEPSEEK_FUND_BATCH_SIZE") or "8")
 DEEPSEEK_STOCK_BATCH_SIZE = int(os.getenv("DEEPSEEK_STOCK_BATCH_SIZE") or "8")
 DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("DEEPSEEK_TIMEOUT_SECONDS") or "90")
+DEEPSEEK_STOCK_ANALYSIS = os.getenv("DEEPSEEK_STOCK_ANALYSIS") == "true"
 
 FUND_SECTORS = {
     "017641": "SPX", "016665": "SPX", "270023": "SPX", "022184": "SPX", "005698": "SPX",
@@ -368,6 +369,8 @@ def analyze_funds(funds: list[dict]) -> dict[str, dict]:
 
 def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
     output = {stock["stock_id"]: deterministic_stock_analysis(stock) for stock in stocks}
+    if not DEEPSEEK_STOCK_ANALYSIS:
+        return output
     system = "你是上市公司事件研究助手。仅依据输入中的行情、公告新闻标题和财务数据总结。只返回JSON对象，键为stock_id；每项含sections(event、financial、reaction、risks、watch)及source_indices。不得虚构事实或来源，不给绝对买卖指令。"
     for start in range(0, len(stocks), DEEPSEEK_STOCK_BATCH_SIZE):
         batch = stocks[start:start + DEEPSEEK_STOCK_BATCH_SIZE]

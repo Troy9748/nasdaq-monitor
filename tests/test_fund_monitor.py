@@ -1,6 +1,6 @@
 import unittest
 
-from fund_monitor import FUND_SECTORS, SKIP_LIVE_STOCK_HISTORY, enrich_series, keyed_analysis_items, max_drawdown, normalize_sections, parse_json_object, period_return, supported_stock_history_market, yahoo_ticker
+from fund_monitor import FUND_SECTORS, SKIP_LIVE_STOCK_HISTORY, analyze_stocks, enrich_series, keyed_analysis_items, max_drawdown, normalize_sections, parse_json_object, period_return, supported_stock_history_market, yahoo_ticker
 
 
 class FundMonitorTest(unittest.TestCase):
@@ -40,6 +40,10 @@ class FundMonitorTest(unittest.TestCase):
     def test_normalize_sections_accepts_lists(self):
         sections = normalize_sections(["a", {"text": "b"}], ("first", "second"))
         self.assertEqual(sections, {"first": "a", "second": "b"})
+
+    def test_stock_deepseek_analysis_is_off_by_default(self):
+        analysis = analyze_stocks([{"stock_id": "x", "name": "X", "news": [], "summary": {}, "financial": None}])
+        self.assertEqual(analysis["x"]["source"], "规则分析")
 
 
 if __name__ == "__main__":
