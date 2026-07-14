@@ -437,7 +437,7 @@ def build_ai_request(summaries: dict[str, dict]) -> tuple[str, dict, str, str]:
             },
             {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
         ],
-        "max_tokens": 2200,
+        "max_tokens": 6000,
         "stream": False,
     }
     if provider == "DeepSeek":
@@ -458,12 +458,14 @@ def request_ai_analysis(summaries: dict[str, dict]) -> tuple[str, str, str | Non
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=150) as response:
-            result = json.load(response)
-        text = result["choices"][0]["message"]["content"].strip()
-        if not text:
-            raise RuntimeError("AI响应为空")
-        return text, provider, model, None
+        for attempt in range(2):
+            with urllib.request.urlopen(request, timeout=240) as response:
+                result = json.load(response)
+            text = (result["choices"][0]["message"].get("content") or "").strip()
+            if text:
+                return text, provider, model, None
+            print(f"⚠️ DeepSeek 第 {attempt + 1} 次未返回最终正文，重试")
+        raise RuntimeError("DeepSeek 连续两次未返回最终正文")
     except (OSError, urllib.error.HTTPError, ValueError, KeyError, RuntimeError) as error:
         print(f"⚠️ 板块AI分析不可用，使用规则分析：{error}")
         return deterministic_analysis(summaries), "规则分析（DeepSeek 回退）", model, f"{type(error).__name__}: {error}"

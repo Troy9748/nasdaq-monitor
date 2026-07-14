@@ -36,6 +36,7 @@ class SectorMonitorTest(unittest.TestCase):
         self.assertEqual(provider, "DeepSeek")
         self.assertEqual(payload["thinking"], {"type": "enabled"})
         self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertGreaterEqual(payload["max_tokens"], 6000)
         self.assertIn("严禁称为主力资金", payload["messages"][0]["content"])
 
 
