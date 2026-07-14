@@ -343,11 +343,24 @@ def load_cached_stock(stock_id: str) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
+def supported_stock_history_market(stock_id: str) -> bool:
+    market = stock_id.split(".", 1)[0] if "." in stock_id else ""
+    return market in {"0", "1", "105", "106", "107", "116", "128"}
+
+
 def build_stock(holding: dict) -> dict:
     cached = load_cached_stock(holding["stock_id"])
     today = datetime.now(SHANGHAI).date().isoformat()
     if cached and cached.get("generated_date") == today and cached.get("series"):
         series = cached["series"]
+    elif not supported_stock_history_market(holding["stock_id"]):
+        # ponytail: cache-only for foreign markets without an exchange-aware fetcher; add one before refreshing them live.
+        if cached:
+            print(f"⚠️ {holding['name']} 使用缓存行情：unsupported stock market")
+            series = cached["series"]
+        else:
+            print(f"⚠️ {holding['name']} 行情不可用：unsupported stock market")
+            series = []
     else:
         try:
             market = holding["stock_id"].split(".", 1)[0]
