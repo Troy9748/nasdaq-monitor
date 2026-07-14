@@ -26,7 +26,8 @@ DATA_DIR = Path("web/public/data")
 FUND_DIR = DATA_DIR / "funds"
 STOCK_DIR = DATA_DIR / "stocks"
 CATALOG_PATH = DATA_DIR / "funds.json"
-DEEPSEEK_BATCH_SIZE = int(os.getenv("DEEPSEEK_BATCH_SIZE") or "24")
+DEEPSEEK_FUND_BATCH_SIZE = int(os.getenv("DEEPSEEK_FUND_BATCH_SIZE") or "8")
+DEEPSEEK_STOCK_BATCH_SIZE = int(os.getenv("DEEPSEEK_STOCK_BATCH_SIZE") or "8")
 DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("DEEPSEEK_TIMEOUT_SECONDS") or "90")
 
 FUND_SECTORS = {
@@ -291,7 +292,7 @@ def deepseek_json(system: str, user: dict) -> dict:
             with urllib.request.urlopen(request, timeout=DEEPSEEK_TIMEOUT_SECONDS) as response:
                 result = json.load(response)
             content = result["choices"][0]["message"].get("content") or ""
-            return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I))
+            return parse_json_object(content)
         except urllib.error.HTTPError as error:
             detail = error.read().decode(errors="replace")[:1000]
             if attempt == attempts - 1:
@@ -304,10 +305,21 @@ def deepseek_json(system: str, user: dict) -> dict:
     raise RuntimeError("DeepSeek returned no result")
 
 
+def parse_json_object(content: str) -> dict:
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
+
 def analyze_funds(funds: list[dict]) -> dict[str, dict]:
     fallback = {fund["code"]: deterministic_fund_analysis(fund) for fund in funds}
-    for start in range(0, len(funds), DEEPSEEK_BATCH_SIZE):
-        batch = funds[start:start + DEEPSEEK_BATCH_SIZE]
+    for start in range(0, len(funds), DEEPSEEK_FUND_BATCH_SIZE):
+        batch = funds[start:start + DEEPSEEK_FUND_BATCH_SIZE]
         compact = {fund["code"]: {"name": fund["name"], "sector": SECTOR_NAMES[fund["sector_code"]], "summary": fund["summary"], "holdings": fund["holdings"]} for fund in batch}
         try:
             result = deepseek_json("你是基金研究助手。仅依据输入数据，只返回JSON对象，键为基金代码；每项含sections，固定包含performance、relative、holdings、risks、watch五个简短中文字符串。不得把定期报告持仓称为实时持仓，不给绝对买卖指令，不虚构新闻。", compact)
@@ -324,8 +336,8 @@ def analyze_funds(funds: list[dict]) -> dict[str, dict]:
 def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
     output = {stock["stock_id"]: deterministic_stock_analysis(stock) for stock in stocks}
     system = "你是上市公司事件研究助手。仅依据输入中的行情、公告新闻标题和财务数据总结。只返回JSON对象，键为stock_id；每项含sections(event、financial、reaction、risks、watch)及source_indices。不得虚构事实或来源，不给绝对买卖指令。"
-    for start in range(0, len(stocks), DEEPSEEK_BATCH_SIZE):
-        batch = stocks[start:start + DEEPSEEK_BATCH_SIZE]
+    for start in range(0, len(stocks), DEEPSEEK_STOCK_BATCH_SIZE):
+        batch = stocks[start:start + DEEPSEEK_STOCK_BATCH_SIZE]
         compact = {stock["stock_id"]: {"name": stock["name"], "summary": stock["summary"], "financial": stock["financial"], "news": stock["news"]} for stock in batch}
         try:
             result = deepseek_json(system, compact)

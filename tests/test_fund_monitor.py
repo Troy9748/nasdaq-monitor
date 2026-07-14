@@ -1,6 +1,6 @@
 import unittest
 
-from fund_monitor import FUND_SECTORS, enrich_series, max_drawdown, period_return, supported_stock_history_market
+from fund_monitor import FUND_SECTORS, enrich_series, max_drawdown, parse_json_object, period_return, supported_stock_history_market
 
 
 class FundMonitorTest(unittest.TestCase):
@@ -19,6 +19,10 @@ class FundMonitorTest(unittest.TestCase):
         self.assertFalse(supported_stock_history_market("005930"))
         self.assertTrue(supported_stock_history_market("105.NVDA"))
         self.assertTrue(supported_stock_history_market("116.09899"))
+
+    def test_parse_json_object_tolerates_wrapped_json(self):
+        self.assertEqual(parse_json_object("```json\n{\"ok\": true}\n```")["ok"], True)
+        self.assertEqual(parse_json_object("说明：\n{\"ok\": true}\n结束")["ok"], True)
 
 
 if __name__ == "__main__":
