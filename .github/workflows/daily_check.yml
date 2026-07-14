@@ -51,7 +51,11 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
           DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
-        run: python -u monitor.py ${{ github.event.schedule == '0 22 * * 0' && '--refresh-fred --force --no-email' || inputs.force_email && '--force' || inputs.force_refresh && '--force --no-email' || '' }}
+          ALERT_VXN_LEVEL: ${{ vars.ALERT_VXN_LEVEL }}
+          ALERT_BREADTH_LEVEL: ${{ vars.ALERT_BREADTH_LEVEL }}
+          ALERT_VOLATILITY_LEVEL: ${{ vars.ALERT_VOLATILITY_LEVEL }}
+          ALERT_EMA_DISTANCE: ${{ vars.ALERT_EMA_DISTANCE }}
+        run: python -u monitor.py ${{ github.event.schedule == '0 22 * * 0' && '--refresh-fred --force --no-email' || github.event.schedule == '0 23 * * 1-5' && '--scheduled-email' || inputs.force_email && '--force' || inputs.force_refresh && '--force --no-email' || '' }}
 
       - name: Commit new market day
         run: |

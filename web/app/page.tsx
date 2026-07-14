@@ -29,7 +29,7 @@ type Summary = {
   max_drawdown_pct: number;
   status: string;
   status_detail: string;
-  alert: { level: string; code: "normal" | "watch" | "important" | "critical"; reasons: string[] };
+  alert: { level: string; code: "normal" | "watch" | "important" | "critical"; reasons: string[]; thresholds: Record<string, number> };
   freshness: { status: string; age_days: number; latest_market_date: string; checked_at: string };
   provenance: {
     latest_source: string;
@@ -40,14 +40,14 @@ type Summary = {
   context: {
     vxn: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
     treasury10y: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
-    breadth: { above_ema200_pct: number; above_ema200_count: number | null; sample_size: number | null; as_of: string; source: string; freshness?: string; age_days?: number } | null;
+    breadth: { above_ema20_pct?: number; above_ema50_pct?: number; above_ema200_pct: number; above_ema200_count: number | null; sample_size: number | null; new_high20_count?: number; new_low20_count?: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
     calibration?: { checked_at: string; corrected_rows: number; pending_rows: number; max_abs_diff_pct: number | null; max_diff_date: string | null } | null;
   };
 };
 
 type RegimeAnalysis = {
   current: string;
-  stats: Record<string, { observations: number; forward: Record<string, { samples: number; median_return_pct: number | null; positive_rate_pct: number | null }> }>;
+  stats: Record<string, { observations: number; forward: Record<string, { samples: number; overlapping_samples: number; median_return_pct: number | null; positive_rate_pct: number | null; median_ci95_low_pct: number | null; median_ci95_high_pct: number | null; excess_vs_baseline_pct: number | null }> }>;
   recent_events: Array<{ date: string; state: string }>;
 };
 
@@ -61,7 +61,7 @@ type MarketData = {
   series: Point[];
 };
 
-type ContextPoint = { date: string; vxn: number | null; treasury10y: number | null; ndx_vxn_corr60: number | null };
+type ContextPoint = { date: string; vxn: number | null; treasury10y: number | null; ndx_vxn_corr60: number | null; breadth_ema20_pct: number | null; breadth_ema50_pct: number | null; breadth_ema200_pct: number | null; breadth_divergence: boolean | null };
 type ContextData = { series: ContextPoint[] };
 
 type Analysis = {
@@ -72,6 +72,8 @@ type Analysis = {
   text: string;
   disclaimer: string;
 };
+
+type Health = { checked_at: string; data?: { status: string; market_date: string }; ai?: { status: string; source: string; model: string | null }; email?: { status: string; market_date: string }; calibration?: { checked_at: string } | null };
 
 const ranges = { "1年": 252, "3年": 756, "5年": 1260, "10年": 2520, 全部: Infinity } as const;
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -270,7 +272,7 @@ function ContextIndicatorChart({
   reference,
 }: {
   points: ContextPoint[];
-  field: "vxn" | "treasury10y" | "ndx_vxn_corr60";
+  field: "vxn" | "treasury10y" | "ndx_vxn_corr60" | "breadth_ema20_pct" | "breadth_ema50_pct" | "breadth_ema200_pct";
   color: string;
   label: string;
   reference?: number;
@@ -340,6 +342,8 @@ export default function Home() {
   const [market, setMarket] = useState<MarketData | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [context, setContext] = useState<ContextData | null>(null);
+  const [analysisHistory, setAnalysisHistory] = useState<Analysis[]>([]);
+  const [health, setHealth] = useState<Health | null>(null);
   const [range, setRange] = useState<keyof typeof ranges>("5年");
   const [logScale, setLogScale] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -352,11 +356,15 @@ export default function Home() {
       }),
       fetch(assetPath("/data/analysis.json")).then((response) => response.json()),
       fetch(assetPath("/data/context.json")).then((response) => response.json()),
+      fetch(assetPath("/data/analysis_history.json")).then((response) => response.json()),
+      fetch(assetPath("/data/health.json")).then((response) => response.json()),
     ])
-      .then(([marketData, analysisData, contextData]) => {
+      .then(([marketData, analysisData, contextData, historyData, healthData]) => {
         setMarket(marketData);
         setAnalysis(analysisData);
         setContext(contextData);
+        setAnalysisHistory(historyData);
+        setHealth(healthData);
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "数据加载失败"));
   }, []);
@@ -458,6 +466,12 @@ export default function Home() {
             <article><div><span>美国10年期收益率</span><strong>{number(summary.context.treasury10y?.value)}%</strong></div><ContextIndicatorChart points={visibleContext} field="treasury10y" color="#f59e0b" label="美国10年期国债收益率历史走势" /></article>
             <article><div><span>NDX/VXN 60日相关性</span><strong>{signed(visibleContext.at(-1)?.ndx_vxn_corr60, "")}</strong></div><ContextIndicatorChart points={visibleContext} field="ndx_vxn_corr60" color="#22d3ee" label="NASDAQ-100 收益与 VXN 变化的60日滚动相关性" reference={0} /></article>
           </div>
+          <div className="risk-grid">
+            <article><div><span>站上 EMA20</span><strong>{number(summary.context.breadth?.above_ema20_pct)}%</strong></div><ContextIndicatorChart points={visibleContext} field="breadth_ema20_pct" color="#22d3ee" label="成分股站上 EMA20 比例" reference={50} /></article>
+            <article><div><span>站上 EMA50</span><strong>{number(summary.context.breadth?.above_ema50_pct)}%</strong></div><ContextIndicatorChart points={visibleContext} field="breadth_ema50_pct" color="#a78bfa" label="成分股站上 EMA50 比例" reference={50} /></article>
+            <article><div><span>站上 EMA200</span><strong>{number(summary.context.breadth?.above_ema200_pct)}%</strong></div><ContextIndicatorChart points={visibleContext} field="breadth_ema200_pct" color="#34d399" label="成分股站上 EMA200 比例" reference={50} /></article>
+          </div>
+          <p className="method-note">市场宽度从本次升级起逐日积累；20 日创新高/新低：{summary.context.breadth?.new_high20_count ?? "—"} / {summary.context.breadth?.new_low20_count ?? "—"}。价格上涨而 EMA200 宽度走弱时标记为背离。</p>
           <p className="method-note">相关性使用日收益与 VXN 日变化的 60 个交易日窗口；仅描述同期关系，不代表因果。</p>
         </section>
 
@@ -467,14 +481,14 @@ export default function Home() {
             {(Object.entries(market.regime_analysis.stats)).map(([state, stats]) => (
               <article key={state}>
                 <div className="evidence-title"><strong>{state}</strong><span>{stats.observations.toLocaleString("zh-CN")} 个交易日</span></div>
-                <table><thead><tr><th>观察期</th><th>样本</th><th>中位收益</th><th>正收益率</th></tr></thead><tbody>
-                  {Object.entries(stats.forward).map(([horizon, value]) => <tr key={horizon}><td>{horizon}</td><td>{value.samples}</td><td className={tone(value.median_return_pct)}>{signed(value.median_return_pct)}</td><td>{signed(value.positive_rate_pct)}</td></tr>)}
+                <table><thead><tr><th>观察期</th><th>独立样本</th><th>中位收益</th><th>95%区间</th><th>超额</th></tr></thead><tbody>
+                  {Object.entries(stats.forward).map(([horizon, value]) => <tr key={horizon}><td>{horizon}</td><td title={`重叠样本 ${value.overlapping_samples}`}>{value.samples}</td><td className={tone(value.median_return_pct)}>{signed(value.median_return_pct)}</td><td>{signed(value.median_ci95_low_pct)}～{signed(value.median_ci95_high_pct)}</td><td className={tone(value.excess_vs_baseline_pct)}>{signed(value.excess_vs_baseline_pct)}</td></tr>)}
                 </tbody></table>
               </article>
             ))}
           </div>
           <div className="event-log"><span>最近状态切换</span>{market.regime_analysis.recent_events.slice(-6).reverse().map((event) => <div key={`${event.date}-${event.state}`}><time>{event.date}</time><strong>{event.state}</strong></div>)}</div>
-          <p className="method-note">状态仅使用当日及此前数据分类；后续收益统计自动排除尚未走完观察期的样本，不含交易成本。</p>
+          <p className="method-note">采用互不重叠样本，95% 为分布无关的中位数区间；“超额”相对同期全市场持有基准。另按高波动/常规波动分组写入数据文件，均不含交易成本。</p>
         </section>
 
         <section className="audit-panel panel">
@@ -494,6 +508,12 @@ export default function Home() {
           <div className="section-head"><div><span className="eyebrow">AI RISK BRIEF</span><h2>结构化市场解读</h2></div><span className="source-chip">{analysis.source}{analysis.model ? ` · ${analysis.model}` : ""} · {new Date(analysis.generated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</span></div>
           <div className="ai-copy">{analysis.text}</div>
           <p className="disclaimer">{analysis.disclaimer}</p>
+          {analysisHistory.length > 1 && <details className="analysis-history"><summary>查看历史 AI 分析（{analysisHistory.length} 期）</summary>{analysisHistory.slice(0, -1).reverse().slice(0, 8).map((item) => <article key={item.market_date}><strong>{item.market_date} · {item.source}</strong><p>{item.text}</p></article>)}</details>}
+        </section>
+
+        <section className="health-panel panel">
+          <div className="section-head"><div><span className="eyebrow">SYSTEM HEALTH</span><h2>自动化运行状态</h2></div><span className="source-chip">{health ? new Date(health.checked_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "—"}</span></div>
+          <div className="health-grid"><p><span>行情</span><strong>{health?.data?.status ?? "—"}</strong><small>{health?.data?.market_date ?? "—"}</small></p><p><span>AI</span><strong>{health?.ai?.status ?? "—"}</strong><small>{health?.ai?.source ?? "—"}</small></p><p><span>邮件</span><strong>{health?.email?.status ?? "—"}</strong><small>{health?.email?.market_date ?? "—"}</small></p><p><span>告警阈值</span><strong>VXN {summary.alert.thresholds.vxn} · 宽度 {summary.alert.thresholds.breadth}%</strong><small>波动 {summary.alert.thresholds.volatility}% · EMA ±{summary.alert.thresholds.ema_distance}%</small></p></div>
         </section>
 
         <section className="table-panel panel">

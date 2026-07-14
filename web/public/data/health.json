@@ -1,0 +1,17 @@
+{
+  "data": {
+    "status": "正常",
+    "market_date": "2026-07-13"
+  },
+  "ai": {
+    "status": "正常",
+    "source": "DeepSeek",
+    "model": "deepseek-v4-flash"
+  },
+  "calibration": null,
+  "email": {
+    "status": "本次禁用",
+    "market_date": "2026-07-13"
+  },
+  "checked_at": "2026-07-14T09:45:46.157584+00:00"
+}

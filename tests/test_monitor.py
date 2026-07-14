@@ -87,6 +87,12 @@ class MonitorTest(unittest.TestCase):
 
         self.assertEqual(analysis["current"], "多头")
         self.assertGreater(analysis["stats"]["多头"]["forward"]["60日"]["samples"], 0)
+        self.assertLess(
+            analysis["stats"]["多头"]["forward"]["60日"]["samples"],
+            analysis["stats"]["多头"]["forward"]["60日"]["overlapping_samples"],
+        )
+        self.assertIn("median_ci95_low_pct", analysis["stats"]["多头"]["forward"]["60日"])
+        self.assertIn("高波动", analysis["environment_stats"])
         self.assertEqual(
             sum(value["observations"] for value in analysis["stats"].values()), 201
         )
@@ -162,6 +168,31 @@ class MonitorTest(unittest.TestCase):
 
         self.assertTrue(job(force=True))
         send_email.assert_called_once()
+
+    @patch("monitor.record_scheduled_email")
+    @patch("monitor.write_health")
+    @patch("monitor.send_email")
+    @patch("monitor.export_data")
+    @patch("monitor.request_ai_analysis", return_value=("analysis", "DeepSeek", "model"))
+    @patch("monitor.build_market_context", return_value=(pd.DataFrame(), {}))
+    @patch("monitor.download_history")
+    @patch("monitor.previous_market_date")
+    @patch("monitor.last_scheduled_email_date", return_value=None)
+    def test_scheduled_email_sends_when_data_was_already_written(
+        self, _last_email, previous, download, _context, _analysis, _export,
+        send_email, _health, record_email
+    ):
+        end = pd.Timestamp.now(tz=NEW_YORK).tz_localize(None).normalize()
+        index = pd.bdate_range(end=end, periods=300)
+        download.return_value = pd.DataFrame(
+            {"Close": range(1000, 1300), "Source": "FRED", "Is_Provisional": False},
+            index=index,
+        )
+        previous.return_value = index[-1].date()
+
+        self.assertTrue(job(scheduled_email=True))
+        send_email.assert_called_once()
+        record_email.assert_called_once_with(index[-1].date().isoformat())
 
 
 if __name__ == "__main__":

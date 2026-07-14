@@ -29,7 +29,10 @@ CONTEXT_CSV_PATH = Path("market_context_daily.csv")
 WEB_DATA_DIR = Path("web/public/data")
 WEB_JSON_PATH = WEB_DATA_DIR / "nasdaq100.json"
 WEB_ANALYSIS_PATH = WEB_DATA_DIR / "analysis.json"
+WEB_ANALYSIS_HISTORY_PATH = WEB_DATA_DIR / "analysis_history.json"
 WEB_CONTEXT_PATH = WEB_DATA_DIR / "context.json"
+WEB_HEALTH_PATH = WEB_DATA_DIR / "health.json"
+EMAIL_STATE_PATH = WEB_DATA_DIR / "email_state.json"
 WEB_CSV_PATH = WEB_DATA_DIR / CSV_PATH.name
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -273,24 +276,38 @@ def calculate_breadth(symbols: list[str]) -> dict:
     if data.empty or "Close" not in data:
         raise RuntimeError("NASDAQ-100 成分股日线下载为空")
     close = data["Close"]
-    observations = []
+    observations = {period: [] for period in (20, 50, 200)}
+    new_highs = 0
+    new_lows = 0
     dates = []
     for symbol in close.columns:
         series = close[symbol].dropna()
         if len(series) < 200:
             continue
-        observations.append(float(series.iloc[-1]) > float(series.ewm(span=200, adjust=False).mean().iloc[-1]))
+        latest = float(series.iloc[-1])
+        for period in observations:
+            observations[period].append(
+                latest > float(series.ewm(span=period, adjust=False).mean().iloc[-1])
+            )
+        window = series.iloc[-20:]
+        new_highs += latest >= float(window.max())
+        new_lows += latest <= float(window.min())
         dates.append(pd.Timestamp(series.index[-1]))
-    if len(observations) < 80:
-        raise RuntimeError(f"仅有 {len(observations)} 个成分股具备 200 日数据")
-    above = sum(observations)
-    return {
-        "above_ema200_pct": round(above / len(observations) * 100, 2),
-        "above_ema200_count": above,
-        "sample_size": len(observations),
+    sample_size = len(observations[200])
+    if sample_size < 80:
+        raise RuntimeError(f"仅有 {sample_size} 个成分股具备 200 日数据")
+    result = {
+        "sample_size": sample_size,
+        "new_high20_count": new_highs,
+        "new_low20_count": new_lows,
         "as_of": max(dates).date().isoformat(),
         "source": "Nasdaq 成分名单 + Yahoo 日线",
     }
+    for period, values in observations.items():
+        above = sum(values)
+        result[f"above_ema{period}_pct"] = round(above / sample_size * 100, 2)
+        result[f"above_ema{period}_count"] = above
+    return result
 
 
 def load_previous_context() -> dict:
@@ -301,9 +318,12 @@ def load_previous_context() -> dict:
 
 def build_market_context(*, refresh_fred: bool = False) -> tuple[pd.DataFrame, dict]:
     history = load_context_history()
+    cached_history = history.copy()
     if refresh_fred or history.empty:
         try:
             history = download_fred_context()
+            for column in cached_history.columns.difference(history.columns):
+                history[column] = cached_history[column]
             print("✅ FRED VXN 与 10年期美债校准完成")
         except Exception as error:
             print(f"⚠️ FRED 市场环境数据不可用，使用缓存: {error}")
@@ -323,12 +343,31 @@ def build_market_context(*, refresh_fred: bool = False) -> tuple[pd.DataFrame, d
         context.update(recent)
     except Exception as error:
         print(f"⚠️ Yahoo 市场环境数据不可用，使用缓存: {error}")
-    if not breadth_updated:
+    if not breadth_updated or not (context.get("breadth") or {}).get("above_ema50_pct"):
         try:
             context["breadth"] = calculate_breadth(download_components())
         except Exception as error:
             print(f"⚠️ NASDAQ-100 市场广度不可用，使用缓存: {error}")
     return history, context
+
+
+def record_context_history(history: pd.DataFrame, context: dict) -> pd.DataFrame:
+    result = history.copy()
+    mappings = {
+        "above_ema20_pct": "BreadthEMA20Pct",
+        "above_ema50_pct": "BreadthEMA50Pct",
+        "above_ema200_pct": "BreadthEMA200Pct",
+        "new_high20_count": "NewHigh20Count",
+        "new_low20_count": "NewLow20Count",
+        "sample_size": "BreadthSampleSize",
+    }
+    breadth = context.get("breadth") or {}
+    if breadth.get("as_of"):
+        date = pd.Timestamp(breadth["as_of"])
+        for source, column in mappings.items():
+            if breadth.get(source) is not None:
+                result.at[date, column] = breadth[source]
+    return result.sort_index()
 
 
 def annotate_context_freshness(context: dict, market_date) -> dict:
@@ -442,6 +481,10 @@ def build_regime_analysis(data: pd.DataFrame) -> dict:
     regimes = regime_series(data)
     close = data["Close"]
     horizons = {"20日": 20, "60日": 60, "120日": 120}
+    baseline = {}
+    for label, sessions in horizons.items():
+        values = close.shift(-sessions) / close * 100 - 100
+        baseline[label] = _forward_statistics(_non_overlapping(values, data.index, sessions))
     stats = {}
     for regime in ("多头", "修复", "防御"):
         mask = regimes == regime
@@ -451,14 +494,29 @@ def build_regime_analysis(data: pd.DataFrame) -> dict:
         }
         stats[regime] = {
             "observations": int(mask.sum()),
-            "forward": {
-                label: {
-                    "samples": int(values.count()),
-                    "median_return_pct": _round_optional(float(values.median())),
-                    "positive_rate_pct": _round_optional(float((values.dropna() > 0).mean() * 100)),
-                }
-                for label, values in forward.items()
-            },
+            "forward": {},
+        }
+        for label, values in forward.items():
+            independent = _non_overlapping(values, data.index, horizons[label])
+            result = _forward_statistics(independent)
+            result["overlapping_samples"] = int(values.count())
+            result["excess_vs_baseline_pct"] = _round_optional(
+                (result["median_return_pct"] or 0) - (baseline[label]["median_return_pct"] or 0)
+            )
+            stats[regime]["forward"][label] = result
+
+    high_volatility = data["Volatility20_Pct"] >= data["Volatility20_Pct"].median()
+    environment_stats = {}
+    for label, mask in (("高波动", high_volatility), ("常规波动", ~high_volatility)):
+        environment_stats[label] = {
+            horizon: _forward_statistics(
+                _non_overlapping(
+                    ((close.shift(-sessions) / close - 1) * 100).where(mask),
+                    data.index,
+                    sessions,
+                )
+            )
+            for horizon, sessions in horizons.items()
         }
 
     changes = regimes.ne(regimes.shift())
@@ -467,32 +525,94 @@ def build_regime_analysis(data: pd.DataFrame) -> dict:
         for date, state in regimes[changes].iloc[-12:].items()
         if pd.notna(state) and state != "未知"
     ]
-    return {"current": str(regimes.iloc[-1]), "stats": stats, "recent_events": events}
+    return {
+        "current": str(regimes.iloc[-1]),
+        "stats": stats,
+        "baseline": baseline,
+        "environment_stats": environment_stats,
+        "recent_events": events,
+    }
+
+
+def _non_overlapping(values: pd.Series, index: pd.Index, sessions: int) -> pd.Series:
+    positions = {date: position for position, date in enumerate(index)}
+    selected = []
+    next_position = 0
+    for date, value in values.dropna().items():
+        position = positions[date]
+        if position >= next_position:
+            selected.append(value)
+            next_position = position + sessions
+    return pd.Series(selected, dtype=float)
+
+
+def _forward_statistics(values: pd.Series) -> dict:
+    clean = values.dropna().sort_values().reset_index(drop=True)
+    samples = len(clean)
+    if not samples:
+        return {
+            "samples": 0,
+            "median_return_pct": None,
+            "positive_rate_pct": None,
+            "median_ci95_low_pct": None,
+            "median_ci95_high_pct": None,
+        }
+    # ponytail: distribution-free median interval; switch to bootstrap only if tail modelling is needed.
+    margin = 0.98 * math.sqrt(samples)
+    low = max(0, math.floor(samples / 2 - margin))
+    high = min(samples - 1, math.ceil(samples / 2 + margin))
+    return {
+        "samples": samples,
+        "median_return_pct": _round_optional(float(clean.median())),
+        "positive_rate_pct": _round_optional(float((clean > 0).mean() * 100)),
+        "median_ci95_low_pct": _round_optional(float(clean.iloc[low])),
+        "median_ci95_high_pct": _round_optional(float(clean.iloc[high])),
+    }
+
+
+def env_float(name: str, default: float, *, minimum: float = 0, maximum: float = 100) -> float:
+    raw = os.getenv(name)
+    try:
+        value = default if not raw else float(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} 必须是数字") from error
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
+    return value
 
 
 def build_alert(snapshot: dict) -> dict:
+    thresholds = {
+        "vxn": env_float("ALERT_VXN_LEVEL", 30),
+        "breadth": env_float("ALERT_BREADTH_LEVEL", 40),
+        "volatility": env_float("ALERT_VOLATILITY_LEVEL", 35),
+        "ema_distance": env_float("ALERT_EMA_DISTANCE", 1, maximum=20),
+    }
     reasons = []
     level = "日常"
     if snapshot["freshness"]["status"] == "严重过期":
-        return {"level": "故障", "code": "critical", "reasons": ["指数行情严重过期"]}
+        return {"level": "故障", "code": "critical", "reasons": ["指数行情严重过期"], "thresholds": thresholds}
     if snapshot["status"] in {"转强", "转弱"}:
         level = "重要"
         reasons.append(snapshot["status_detail"])
     context = snapshot.get("context", {})
     vxn = (context.get("vxn") or {}).get("value")
     breadth = (context.get("breadth") or {}).get("above_ema200_pct")
-    if vxn is not None and vxn >= 30:
+    if vxn is not None and vxn >= thresholds["vxn"]:
         reasons.append(f"VXN 升至 {vxn:.2f}")
-    if breadth is not None and breadth < 40:
+    if breadth is not None and breadth < thresholds["breadth"]:
         reasons.append(f"市场广度降至 {breadth:.2f}%")
-    if snapshot["volatility20_pct"] is not None and snapshot["volatility20_pct"] >= 35:
+    if snapshot["volatility20_pct"] is not None and snapshot["volatility20_pct"] >= thresholds["volatility"]:
         reasons.append(f"20日年化波动率升至 {snapshot['volatility20_pct']:.2f}%")
+    if abs(snapshot.get("distance_ema200_pct", 100)) <= thresholds["ema_distance"]:
+        reasons.append(f"距 EMA200 仅 {snapshot['distance_ema200_pct']:+.2f}%")
     if reasons and level == "日常":
         level = "注意"
     return {
         "level": level,
         "code": {"日常": "normal", "注意": "watch", "重要": "important"}[level],
         "reasons": reasons or ["未触发趋势切换或高风险阈值"],
+        "thresholds": thresholds,
     }
 
 
@@ -673,6 +793,15 @@ def export_data(
     WEB_ANALYSIS_PATH.write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
     )
+    history = []
+    if WEB_ANALYSIS_HISTORY_PATH.exists():
+        history = json.loads(WEB_ANALYSIS_HISTORY_PATH.read_text(encoding="utf-8"))
+    history = [item for item in history if item.get("market_date") != analysis["market_date"]]
+    history.append(analysis)
+    WEB_ANALYSIS_HISTORY_PATH.write_text(
+        json.dumps(sorted(history, key=lambda item: item["market_date"]), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     aligned = context_history.reindex(data.index).ffill(limit=5) if not context_history.empty else pd.DataFrame(index=data.index)
     for key, column in (("vxn", "VXN"), ("treasury10y", "Treasury10Y")):
         item = context.get(key) or {}
@@ -682,17 +811,60 @@ def export_data(
     ndx_returns = data["Close"].pct_change()
     vxn_changes = aligned.get("VXN", pd.Series(index=data.index, dtype=float)).pct_change()
     correlation = ndx_returns.rolling(60).corr(vxn_changes)
+    breadth_change20 = aligned.get(
+        "BreadthEMA200Pct", pd.Series(index=data.index, dtype=float)
+    ).diff(20)
+    ndx_return20 = data["Close"].pct_change(20) * 100
     context_series = [
         {
             "date": date.date().isoformat(),
             "vxn": _json_number(aligned.at[date, "VXN"]) if "VXN" in aligned else None,
             "treasury10y": _json_number(aligned.at[date, "Treasury10Y"]) if "Treasury10Y" in aligned else None,
             "ndx_vxn_corr60": _json_number(correlation.loc[date]),
+            "breadth_ema20_pct": _json_number(aligned.at[date, "BreadthEMA20Pct"]) if "BreadthEMA20Pct" in aligned else None,
+            "breadth_ema50_pct": _json_number(aligned.at[date, "BreadthEMA50Pct"]) if "BreadthEMA50Pct" in aligned else None,
+            "breadth_ema200_pct": _json_number(aligned.at[date, "BreadthEMA200Pct"]) if "BreadthEMA200Pct" in aligned else None,
+            "breadth_divergence": bool(ndx_return20.loc[date] > 0 and breadth_change20.loc[date] < 0)
+            if pd.notna(ndx_return20.loc[date]) and pd.notna(breadth_change20.loc[date])
+            else None,
         }
         for date in data.index
     ]
     WEB_CONTEXT_PATH.write_text(
         json.dumps({**context, "series": context_series}, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def write_health(**updates) -> dict:
+    health = {}
+    if WEB_HEALTH_PATH.exists():
+        health = json.loads(WEB_HEALTH_PATH.read_text(encoding="utf-8"))
+    health.update(updates)
+    health["checked_at"] = datetime.now(ZoneInfo("UTC")).isoformat()
+    WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    WEB_HEALTH_PATH.write_text(
+        json.dumps(health, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
+    )
+    return health
+
+
+def last_scheduled_email_date() -> str | None:
+    if not EMAIL_STATE_PATH.exists():
+        return None
+    return json.loads(EMAIL_STATE_PATH.read_text(encoding="utf-8")).get("last_sent_market_date")
+
+
+def record_scheduled_email(market_date: str) -> None:
+    EMAIL_STATE_PATH.write_text(
+        json.dumps(
+            {
+                "last_sent_market_date": market_date,
+                "sent_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -756,14 +928,28 @@ def send_email(snapshot: dict, analysis: dict) -> None:
     print(f"✅ 邮件已发送至 {receiver}")
 
 
-def job(*, send_mail: bool = True, force: bool = False, refresh_fred: bool = False) -> bool:
+def job(
+    *,
+    send_mail: bool = True,
+    force: bool = False,
+    refresh_fred: bool = False,
+    scheduled_email: bool = False,
+) -> bool:
     old_date = previous_market_date()
     print(f"正在更新 {MARKET_NAME} ({TICKER})：历史基准 + Yahoo 最新交易日...")
     data = calculate_indicators(download_history(refresh_fred=refresh_fred))
     validate_history(data)
     freshness = build_freshness(data)
     latest_date = data.index[-1].date()
-    if not force and old_date is not None and latest_date <= old_date:
+    has_new_market_day = old_date is None or latest_date > old_date
+    if scheduled_email and last_scheduled_email_date() == latest_date.isoformat():
+        write_health(
+            data={"status": "正常", "market_date": latest_date.isoformat()},
+            email={"status": "已发送", "market_date": latest_date.isoformat()},
+        )
+        print(f"{latest_date} 的定时日报已经发送，跳过重复邮件")
+        return False
+    if not force and not scheduled_email and not has_new_market_day:
         print(
             f"没有新的交易日数据（最新 {latest_date}，新鲜度：{freshness['status']}），跳过日报和提交"
         )
@@ -771,6 +957,7 @@ def job(*, send_mail: bool = True, force: bool = False, refresh_fred: bool = Fal
 
     context_history, context = build_market_context(refresh_fred=refresh_fred)
     context = annotate_context_freshness(context, latest_date)
+    context_history = record_context_history(context_history, context)
     if data.attrs.get("calibration_audit"):
         context["calibration"] = data.attrs["calibration_audit"]
     snapshot = build_snapshot(data, context, freshness)
@@ -805,9 +992,22 @@ def job(*, send_mail: bool = True, force: bool = False, refresh_fred: bool = Fal
     }
     print(f"✅ 分析来源: {source}" + (f" ({model})" if model else ""))
     export_data(data, snapshot, analysis, context_history, context, regime_analysis)
+    write_health(
+        data={"status": freshness["status"], "market_date": snapshot["market_date"]},
+        ai={"status": "正常" if source not in {"规则分析", "规则分析（AI 回退）"} else "回退", "source": source, "model": model},
+        calibration=context.get("calibration"),
+        email={"status": "待发送" if send_mail else "本次禁用", "market_date": snapshot["market_date"]},
+    )
     print(f"✅ 已更新至 {latest_date}，共 {len(data)} 个交易日")
     if send_mail:
-        send_email(snapshot, analysis)
+        try:
+            send_email(snapshot, analysis)
+            if scheduled_email:
+                record_scheduled_email(snapshot["market_date"])
+            write_health(email={"status": "已发送", "market_date": snapshot["market_date"]})
+        except Exception as error:
+            write_health(email={"status": "失败", "market_date": snapshot["market_date"], "error_type": type(error).__name__})
+            raise
     return True
 
 
@@ -816,9 +1016,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-email", action="store_true", help="生成数据但不发送邮件")
     parser.add_argument("--force", action="store_true", help="即使没有新交易日也重新生成")
     parser.add_argument("--refresh-fred", action="store_true", help="执行每周 FRED 权威历史校准")
+    parser.add_argument("--scheduled-email", action="store_true", help="定时日报：每个行情日期最多发送一次")
     arguments = parser.parse_args()
     job(
         send_mail=not arguments.no_email,
         force=arguments.force,
         refresh_fred=arguments.refresh_fred,
+        scheduled_email=arguments.scheduled_email,
     )

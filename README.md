@@ -10,7 +10,7 @@
 4. 校验日期、价格、样本数、重复行和数据新鲜度；超过 7 天未更新时使任务失败并告警。
 5. 计算趋势、动量、波动、回撤和当前成分股站上 EMA200 的比例。
 6. DeepSeek/OpenAI 只基于提供的数据生成条件化风险框架，失败时退回规则分析。
-7. 新交易日发送邮件并提交 CSV、网页 JSON 和分析结果；节假日不会重复发送。
+7. 定时日报按行情日期幂等发送；即使数据被手动提前写入，07:00 任务仍会发送，每个行情日期最多一次。
 8. 网页数据提交后由 GitHub Pages 自动构建并发布；本地 Codex 仍在 07:20 更新公开 Sites 镜像。
 
 ## GitHub Secrets
@@ -21,6 +21,13 @@
 - `OPENAI_API_KEY`：可选；OpenAI 或 DeepSeek API key，不配置时使用规则分析
 
 仓库变量 `OPENAI_MODEL` 用于覆盖默认模型 `gpt-5.4-mini`；使用兼容服务时再设置 `OPENAI_BASE_URL`。
+
+告警阈值可在 **Settings → Secrets and variables → Actions → Variables** 调整：
+
+- `ALERT_VXN_LEVEL`：VXN 注意线，默认 `30`
+- `ALERT_BREADTH_LEVEL`：EMA200 市场宽度注意线，默认 `40`
+- `ALERT_VOLATILITY_LEVEL`：20 日年化波动率注意线，默认 `35`
+- `ALERT_EMA_DISTANCE`：接近 EMA200 的百分比距离，默认 `1`
 
 设置 `OPENAI_API_KEY`：
 
@@ -63,6 +70,10 @@ pnpm dev
 - VXN、十年期美债和 NDX/VXN 60 日滚动相关性的历史联动；
 - FRED 对 Yahoo 临时收盘的周度校准差异审计；
 - 日常、注意、重要和故障四级提醒，以及最近状态切换事件。
+- 互不重叠的 20/60/120 日历史样本、中位数 95% 区间及相对全市场基准超额；
+- EMA20/50/200 市场宽度、20 日新高/新低及后续逐日积累的宽度历史；
+- 按行情日保存的 AI 分析历史，以及行情、AI、邮件和校准运行健康状态；
+- 网页展示当前生效的四项告警阈值。
 
 主公开网页：`https://www.lxh9748.fun/nasdaq-monitor/`，每次 `web/` 数据或代码提交后由 GitHub Actions 自动发布，不依赖本机。Sites 镜像保留在 `https://ndx-signal-desk.lxh9748.chatgpt.site`。
 
@@ -70,6 +81,6 @@ pnpm dev
 
 - FRED 序列为 Nasdaq, Inc. 提供的 NASDAQ-100 每日收盘指数点位，是历史基准；Yahoo 临时行会在每周校准时被 FRED 覆盖。
 - VXN 使用 FRED 的 `VXNCLS`，十年期美债使用 `DGS10`；最新未校准值可由 Yahoo 补充。
-- 市场广度使用 Nasdaq 官方当前成分名单与成分股日线计算，只描述当前内部健康度，不用于历史回测，避免幸存者偏差。
+- 市场广度使用 Nasdaq 官方当前成分名单与成分股日线计算；历史从功能启用日开始逐日积累，不回填当前成分股的虚假历史，避免幸存者偏差。
 - 日报以数据源返回的最新已落盘交易日为准，不使用脚本运行日冒充行情日期。
 - AI 只能解释传入指标，不含新闻检索，只输出条件化风险管理框架，不构成投资建议。
