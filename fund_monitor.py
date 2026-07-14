@@ -324,6 +324,14 @@ def parse_json_object(content: str) -> dict:
         raise
 
 
+def keyed_analysis_items(result, key_field: str):
+    if isinstance(result, dict):
+        return result.items()
+    if isinstance(result, list):
+        return ((item.get(key_field), item) for item in result if isinstance(item, dict) and item.get(key_field))
+    return []
+
+
 def analyze_funds(funds: list[dict]) -> dict[str, dict]:
     fallback = {fund["code"]: deterministic_fund_analysis(fund) for fund in funds}
     for start in range(0, len(funds), DEEPSEEK_FUND_BATCH_SIZE):
@@ -331,8 +339,11 @@ def analyze_funds(funds: list[dict]) -> dict[str, dict]:
         compact = {fund["code"]: {"name": fund["name"], "sector": SECTOR_NAMES[fund["sector_code"]], "summary": fund["summary"], "holdings": fund["holdings"]} for fund in batch}
         try:
             result = deepseek_json("你是基金研究助手。仅依据输入数据，只返回JSON对象，键为基金代码；每项含sections，固定包含performance、relative、holdings、risks、watch五个简短中文字符串。不得把定期报告持仓称为实时持仓，不给绝对买卖指令，不虚构新闻。", compact)
-            for code, item in result.items():
-                if code in fallback and all((item.get("sections") or {}).get(key) for key in ("performance", "relative", "holdings", "risks", "watch")):
+            for code, item in keyed_analysis_items(result, "code"):
+                if not isinstance(item, dict):
+                    continue
+                sections = item.get("sections") or {}
+                if code in fallback and all(sections.get(key) for key in ("performance", "relative", "holdings", "risks", "watch")):
                     fallback[code] = {"sections": item["sections"], "evidence": [], "source": "DeepSeek", "error": None}
         except Exception as error:
             for fund in batch:
@@ -349,7 +360,9 @@ def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
         compact = {stock["stock_id"]: {"name": stock["name"], "summary": stock["summary"], "financial": stock["financial"], "news": stock["news"]} for stock in batch}
         try:
             result = deepseek_json(system, compact)
-            for stock_id, item in result.items():
+            for stock_id, item in keyed_analysis_items(result, "stock_id"):
+                if not isinstance(item, dict):
+                    continue
                 sections = item.get("sections") or {}
                 if stock_id in output and all(sections.get(key) for key in ("event", "financial", "reaction", "risks", "watch")):
                     valid = [index for index in item.get("source_indices") or [] if isinstance(index, int) and 0 <= index < len(compact[stock_id]["news"])]

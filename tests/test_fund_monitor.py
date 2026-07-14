@@ -1,6 +1,6 @@
 import unittest
 
-from fund_monitor import FUND_SECTORS, SKIP_LIVE_STOCK_HISTORY, enrich_series, max_drawdown, parse_json_object, period_return, supported_stock_history_market, yahoo_ticker
+from fund_monitor import FUND_SECTORS, SKIP_LIVE_STOCK_HISTORY, enrich_series, keyed_analysis_items, max_drawdown, parse_json_object, period_return, supported_stock_history_market, yahoo_ticker
 
 
 class FundMonitorTest(unittest.TestCase):
@@ -32,6 +32,10 @@ class FundMonitorTest(unittest.TestCase):
     def test_parse_json_object_tolerates_wrapped_json(self):
         self.assertEqual(parse_json_object("```json\n{\"ok\": true}\n```")["ok"], True)
         self.assertEqual(parse_json_object("说明：\n{\"ok\": true}\n结束")["ok"], True)
+
+    def test_keyed_analysis_items_accepts_dict_or_list(self):
+        self.assertEqual(dict(keyed_analysis_items({"001": {"ok": True}}, "code"))["001"]["ok"], True)
+        self.assertEqual(dict(keyed_analysis_items([{"code": "001", "ok": True}, []], "code"))["001"]["ok"], True)
 
 
 if __name__ == "__main__":
