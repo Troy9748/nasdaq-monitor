@@ -33,3 +33,17 @@ test("sector monitor exports eight usable core benchmarks", async () => {
   assert.deepEqual(Object.keys(analysis.sections).sort(), ["confirmation", "next", "risks", "rotation", "today"]);
   assert.ok(Array.isArray(analysis.evidence));
 });
+
+test("fund drilldown exports every user fund and disclosed stock files", async () => {
+  const catalog = await readJson("funds.json");
+  assert.equal(catalog.funds.length, 29);
+  assert.equal(new Set(catalog.funds.map((fund) => fund.code)).size, 29);
+  assert.ok(catalog.funds.every((fund) => fund.series.length > 0 && fund.path));
+  const details = await Promise.all(catalog.funds.map((fund) => readJson(`funds/${fund.code}.json`)));
+  assert.ok(details.every((fund) => fund.analysis?.sections && Array.isArray(fund.holdings)));
+  const stockPaths = [...new Set(details.flatMap((fund) => fund.holdings.map((holding) => holding.stock_path)).filter(Boolean))];
+  assert.ok(stockPaths.length > 50);
+  const sample = JSON.parse(await readFile(new URL(`../public${stockPaths[0]}`, import.meta.url), "utf8"));
+  assert.ok(sample.analysis?.sections);
+  assert.ok(Array.isArray(sample.news));
+});

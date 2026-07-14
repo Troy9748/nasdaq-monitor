@@ -1,0 +1,44 @@
+name: Daily Fund Holdings Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "fund_monitor.py"
+      - ".github/workflows/fund_check.yml"
+  schedule:
+    # 基金净值通常晚于收盘发布：北京时间工作日 22:30，次日 00:30 补一次。
+    - cron: "30 14 * * 1-5"
+    - cron: "30 16 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: fund-holdings-daily
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Update fund, holdings, stock and analysis data
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-v4-pro' }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL || vars.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
+        run: python -u fund_monitor.py
+      - name: Commit updated fund data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add web/public/data/funds.json web/public/data/funds web/public/data/stocks
+          git diff --cached --quiet || git commit -m "Auto-update: funds and disclosed holdings"
+          git push
