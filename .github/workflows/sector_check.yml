@@ -40,6 +40,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add sector_indices_daily.csv web/public/data/sector_indices_daily.csv web/public/data/sectors.json web/public/data/sector_analysis.json
-          git diff --cached --quiet || git commit -m "Auto-update: holdings sector indices"
-          git pull --rebase origin main
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-update: holdings sector indices"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
