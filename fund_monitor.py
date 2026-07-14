@@ -46,6 +46,12 @@ SECTOR_NAMES = {
     "930708": "中证有色金属", "980022": "国证机器人产业", "SHAU": "上海金", "SPX": "标普500",
 }
 
+YAHOO_TICKER_OVERRIDES = {
+    "000660": "000660.KS",  # SK hynix
+    "005930": "005930.KS",  # Samsung Electronics
+}
+SKIP_LIVE_STOCK_HISTORY = {"106.BRK_B", "000660", "005930"}
+
 
 def request_bytes(url: str, timeout: int = 30) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/"})
@@ -168,6 +174,8 @@ def a_share_stock(stock_id: str) -> bool:
 
 
 def yahoo_ticker(stock_id: str, code: str) -> str:
+    if stock_id in YAHOO_TICKER_OVERRIDES:
+        return YAHOO_TICKER_OVERRIDES[stock_id]
     market = stock_id.split(".", 1)[0] if "." in stock_id else ""
     if market in {"105", "106", "107"}:
         return code.replace("_", "-")
@@ -360,7 +368,7 @@ def load_cached_stock(stock_id: str) -> dict | None:
 
 def supported_stock_history_market(stock_id: str) -> bool:
     market = stock_id.split(".", 1)[0] if "." in stock_id else ""
-    return market in {"0", "1", "105", "106", "107", "116", "128"}
+    return stock_id in YAHOO_TICKER_OVERRIDES or market in {"0", "1", "105", "106", "107", "116", "128"}
 
 
 def build_stock(holding: dict) -> dict:
@@ -368,6 +376,9 @@ def build_stock(holding: dict) -> dict:
     today = datetime.now(SHANGHAI).date().isoformat()
     if cached and cached.get("generated_date") == today and cached.get("series"):
         series = cached["series"]
+    elif holding["stock_id"] in SKIP_LIVE_STOCK_HISTORY:
+        # ponytail: these tickers are low-signal for the China fund drilldown and yfinance often rate-limits them; add a stable vendor before enabling live refresh.
+        series = (cached or {}).get("series", [])
     elif not supported_stock_history_market(holding["stock_id"]):
         # ponytail: cache-only for foreign markets without an exchange-aware fetcher; add one before refreshing them live.
         if cached:
@@ -381,7 +392,7 @@ def build_stock(holding: dict) -> dict:
             market = holding["stock_id"].split(".", 1)[0]
             if a_share_stock(holding["stock_id"]):
                 series = eastmoney_stock_series(holding["stock_id"])
-            elif market in {"105", "106", "107"}:
+            elif market == "105":
                 series = nasdaq_stock_series(holding["code"])
             elif market in {"116", "128"}:
                 series = hong_kong_stock_series(holding["code"])

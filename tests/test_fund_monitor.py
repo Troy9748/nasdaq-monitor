@@ -1,6 +1,6 @@
 import unittest
 
-from fund_monitor import FUND_SECTORS, enrich_series, max_drawdown, parse_json_object, period_return, supported_stock_history_market
+from fund_monitor import FUND_SECTORS, SKIP_LIVE_STOCK_HISTORY, enrich_series, max_drawdown, parse_json_object, period_return, supported_stock_history_market, yahoo_ticker
 
 
 class FundMonitorTest(unittest.TestCase):
@@ -14,11 +14,20 @@ class FundMonitorTest(unittest.TestCase):
         self.assertGreater(period_return(series, 5), 0)
         self.assertEqual(max_drawdown(series), 0)
 
-    def test_unqualified_foreign_stock_history_is_cache_only(self):
-        self.assertFalse(supported_stock_history_market("000660"))
-        self.assertFalse(supported_stock_history_market("005930"))
+    def test_supported_foreign_stock_history_markets(self):
+        self.assertTrue(supported_stock_history_market("000660"))
+        self.assertTrue(supported_stock_history_market("005930"))
         self.assertTrue(supported_stock_history_market("105.NVDA"))
+        self.assertTrue(supported_stock_history_market("106.BRK_B"))
         self.assertTrue(supported_stock_history_market("116.09899"))
+
+    def test_yahoo_ticker_maps_foreign_holdings(self):
+        self.assertEqual(yahoo_ticker("000660", "000660"), "000660.KS")
+        self.assertEqual(yahoo_ticker("005930", "005930"), "005930.KS")
+        self.assertEqual(yahoo_ticker("106.BRK_B", "BRK_B"), "BRK-B")
+
+    def test_rate_limited_holdings_are_cache_only(self):
+        self.assertEqual(SKIP_LIVE_STOCK_HISTORY, {"106.BRK_B", "000660", "005930"})
 
     def test_parse_json_object_tolerates_wrapped_json(self):
         self.assertEqual(parse_json_object("```json\n{\"ok\": true}\n```")["ok"], True)
