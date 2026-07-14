@@ -267,12 +267,12 @@ def stock_summary(series: list[dict]) -> dict:
 
 def deterministic_fund_analysis(fund: dict) -> dict:
     names = "、".join(item["name"] for item in fund["holdings"][:3]) or "暂无可核验重仓股"
-    return {"sections": {"performance": "近期净值表现与波动需要结合所属板块共同观察。", "relative": f"主要参考{SECTOR_NAMES[fund['sector_code']]}指数判断相对强弱。", "holdings": f"最新公开重仓股包括{names}。", "risks": "公开持仓具有报告期滞后，不代表当前实时仓位。", "watch": "关注净值趋势、板块指数和重仓股表现是否形成一致确认。"}, "evidence": [], "source": "规则分析"}
+    return {"sections": {"performance": "近期净值表现与波动需要结合所属板块共同观察。", "relative": f"主要参考{SECTOR_NAMES[fund['sector_code']]}指数判断相对强弱。", "holdings": f"最新公开重仓股包括{names}。", "risks": "公开持仓具有报告期滞后，不代表当前实时仓位。", "watch": "关注净值趋势、板块指数和重仓股表现是否形成一致确认。"}, "evidence": [], "source": "规则分析", "error": None}
 
 
 def deterministic_stock_analysis(stock: dict) -> dict:
     event = stock["news"][0]["title"] if stock["news"] else "近期没有取得新的可核验公告或新闻。"
-    return {"sections": {"event": event, "financial": "结合最近一期公开财务数据观察经营变化。", "reaction": "价格与成交量反应需结合事件发生日期判断。", "risks": "新闻标题不等同于事件最终影响，仍需阅读原始公告。", "watch": "关注后续公告、财报和量价确认。"}, "source_indices": list(range(min(3, len(stock["news"])))), "source": "规则分析"}
+    return {"sections": {"event": event, "financial": "结合最近一期公开财务数据观察经营变化。", "reaction": "价格与成交量反应需结合事件发生日期判断。", "risks": "新闻标题不等同于事件最终影响，仍需阅读原始公告。", "watch": "关注后续公告、财报和量价确认。"}, "source_indices": list(range(min(3, len(stock["news"])))), "source": "规则分析", "error": None}
 
 
 def deepseek_json(system: str, user: dict) -> dict:
@@ -280,7 +280,7 @@ def deepseek_json(system: str, user: dict) -> dict:
     if not api_key:
         raise RuntimeError("missing DeepSeek API key")
     base = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
-    payload = {"model": os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-pro", "messages": [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}], "response_format": {"type": "json_object"}, "thinking": {"type": "enabled"}, "reasoning_effort": "high", "max_tokens": 12000, "stream": False}
+    payload = {"model": os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-pro", "messages": [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}], "response_format": {"type": "json_object"}, "thinking": {"type": "enabled"}, "reasoning_effort": "high", "max_tokens": 6000, "stream": False}
     body = json.dumps(payload).encode()
     for attempt in range(2):
         try:
@@ -303,8 +303,10 @@ def analyze_funds(funds: list[dict]) -> dict[str, dict]:
         result = deepseek_json("你是基金研究助手。仅依据输入数据，为每只基金返回对象，键为基金代码；每项含sections，固定包含performance、relative、holdings、risks、watch五个简短中文字符串。不得把定期报告持仓称为实时持仓，不给绝对买卖指令，不虚构新闻。", compact)
         for code, item in result.items():
             if code in fallback and all((item.get("sections") or {}).get(key) for key in ("performance", "relative", "holdings", "risks", "watch")):
-                fallback[code] = {"sections": item["sections"], "evidence": [], "source": "DeepSeek"}
+                fallback[code] = {"sections": item["sections"], "evidence": [], "source": "DeepSeek", "error": None}
     except Exception as error:
+        for item in fallback.values():
+            item["error"] = f"{type(error).__name__}: {error}"
         print(f"⚠️ 基金 DeepSeek 分析回退：{error}")
     return fallback
 
@@ -321,8 +323,10 @@ def analyze_stocks(stocks: list[dict]) -> dict[str, dict]:
                 sections = item.get("sections") or {}
                 if stock_id in output and all(sections.get(key) for key in ("event", "financial", "reaction", "risks", "watch")):
                     valid = [index for index in item.get("source_indices") or [] if isinstance(index, int) and 0 <= index < len(compact[stock_id]["news"])]
-                    output[stock_id] = {"sections": sections, "source_indices": valid[:5], "source": "DeepSeek"}
+                    output[stock_id] = {"sections": sections, "source_indices": valid[:5], "source": "DeepSeek", "error": None}
         except Exception as error:
+            for stock in batch:
+                output[stock["stock_id"]]["error"] = f"{type(error).__name__}: {error}"
             print(f"⚠️ 股票 DeepSeek 批次分析回退：{error}")
     return output
 
