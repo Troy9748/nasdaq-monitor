@@ -1,7 +1,7 @@
 {
   "data": {
     "status": "正常",
-    "market_date": "2026-07-16"
+    "market_date": "2026-07-17"
   },
   "ai": {
     "status": "正常",
@@ -11,7 +11,7 @@
   "calibration": null,
   "email": {
     "status": "已发送",
-    "market_date": "2026-07-16"
+    "market_date": "2026-07-17"
   },
-  "checked_at": "2026-07-17T00:04:46.362445+00:00"
+  "checked_at": "2026-07-17T23:57:57.913939+00:00"
 }
