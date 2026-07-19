@@ -8,10 +8,16 @@
     "source": "DeepSeek",
     "model": "deepseek-v4-flash"
   },
-  "calibration": null,
+  "calibration": {
+    "checked_at": "2026-07-19T22:49:48.670439+00:00",
+    "corrected_rows": 5,
+    "pending_rows": 0,
+    "max_abs_diff_pct": 0.0,
+    "max_diff_date": "2026-07-17"
+  },
   "email": {
-    "status": "已发送",
+    "status": "本次禁用",
     "market_date": "2026-07-17"
   },
-  "checked_at": "2026-07-17T23:57:57.913939+00:00"
+  "checked_at": "2026-07-19T22:50:20.566575+00:00"
 }
