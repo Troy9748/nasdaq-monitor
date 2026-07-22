@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: nasdaq100-daily
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   monitor:
@@ -62,5 +62,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add nasdaq100_daily_data.csv market_context_daily.csv web/public/data/
-          git diff --cached --quiet || git commit -m "Auto-update: NASDAQ-100 market data"
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-update: NASDAQ-100 market data"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi

@@ -77,7 +77,7 @@ type Health = { checked_at: string; data?: { status: string; market_date: string
 
 const ranges = { "1年": 252, "3年": 756, "5年": 1260, "10年": 2520, 全部: Infinity } as const;
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const assetPath = (path: string) => `${basePath}${path}`;
+const assetPath = (path: string) => `${basePath}${path}${path.endsWith(".json") ? `?v=${Date.now()}` : ""}`;
 
 function signed(value: number | null | undefined, suffix = "%") {
   return value == null ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}${suffix}`;
@@ -350,14 +350,14 @@ export default function Home() {
 
   useEffect(() => {
     Promise.all([
-      fetch(assetPath("/data/nasdaq100.json")).then((response) => {
+      fetch(assetPath("/data/nasdaq100.json"), { cache: "no-store" }).then((response) => {
         if (!response.ok) throw new Error("市场数据尚未生成");
         return response.json();
       }),
-      fetch(assetPath("/data/analysis.json")).then((response) => response.json()),
-      fetch(assetPath("/data/context.json")).then((response) => response.json()),
-      fetch(assetPath("/data/analysis_history.json")).then((response) => response.json()),
-      fetch(assetPath("/data/health.json")).then((response) => response.json()),
+      fetch(assetPath("/data/analysis.json"), { cache: "no-store" }).then((response) => response.json()),
+      fetch(assetPath("/data/context.json"), { cache: "no-store" }).then((response) => response.json()),
+      fetch(assetPath("/data/analysis_history.json"), { cache: "no-store" }).then((response) => response.json()),
+      fetch(assetPath("/data/health.json"), { cache: "no-store" }).then((response) => response.json()),
     ])
       .then(([marketData, analysisData, contextData, historyData, healthData]) => {
         setMarket(marketData);

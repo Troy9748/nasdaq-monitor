@@ -2,8 +2,15 @@ name: Dashboard Build
 
 on:
   workflow_dispatch:
+  schedule:
+    # 北京时间周二至周六 07:20，NASDAQ 数据更新后兜底刷新网页。
+    - cron: "20 23 * * 1-5"
+    # 北京时间交易日 16:20，A股板块指数收盘更新后兜底刷新网页。
+    - cron: "20 8 * * 1-5"
+    # 北京时间交易日 22:45，基金净值更新后兜底刷新网页。
+    - cron: "45 14 * * 1-5"
   workflow_run:
-    workflows: ["Daily Holdings Sector Check", "Daily Fund Holdings Check"]
+    workflows: ["Daily NASDAQ-100 Check", "Daily Holdings Sector Check", "Daily Fund Holdings Check"]
     types: [completed]
   push:
     branches: [main]
