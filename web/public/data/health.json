@@ -9,15 +9,15 @@
     "model": "deepseek-v4-flash"
   },
   "calibration": {
-    "checked_at": "2026-08-02T22:53:54.727267+00:00",
+    "checked_at": "2026-08-09T22:28:09.918090+00:00",
     "corrected_rows": 5,
     "pending_rows": 0,
     "max_abs_diff_pct": 0.0,
-    "max_diff_date": "2026-07-31"
+    "max_diff_date": "2026-08-07"
   },
   "email": {
-    "status": "已发送",
+    "status": "本次禁用",
     "market_date": "2026-08-07"
   },
-  "checked_at": "2026-08-07T23:38:58.572728+00:00"
+  "checked_at": "2026-08-09T22:28:38.229742+00:00"
 }
