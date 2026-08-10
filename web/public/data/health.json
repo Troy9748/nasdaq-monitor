@@ -1,7 +1,7 @@
 {
   "data": {
     "status": "正常",
-    "market_date": "2026-08-07"
+    "market_date": "2026-08-10"
   },
   "ai": {
     "status": "正常",
@@ -16,8 +16,8 @@
     "max_diff_date": "2026-08-07"
   },
   "email": {
-    "status": "本次禁用",
-    "market_date": "2026-08-07"
+    "status": "已发送",
+    "market_date": "2026-08-10"
   },
-  "checked_at": "2026-08-09T22:28:38.229742+00:00"
+  "checked_at": "2026-08-10T23:41:01.310653+00:00"
 }
