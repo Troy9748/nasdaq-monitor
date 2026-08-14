@@ -1,12 +1,12 @@
 {
   "data": {
     "status": "正常",
-    "market_date": "2026-08-13"
+    "market_date": "2026-08-14"
   },
   "ai": {
-    "status": "回退",
-    "source": "规则分析",
-    "model": null
+    "status": "正常",
+    "source": "DeepSeek",
+    "model": "deepseek-v4-flash"
   },
   "calibration": {
     "checked_at": "2026-08-09T22:28:09.918090+00:00",
@@ -19,5 +19,5 @@
     "status": "已发送",
     "market_date": "2026-08-13"
   },
-  "checked_at": "2026-08-14T10:54:09.987015+00:00"
+  "checked_at": "2026-08-14T14:09:53.080727+00:00"
 }
