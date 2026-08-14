@@ -14,6 +14,7 @@ from email.utils import formataddr
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -396,6 +397,61 @@ def build_freshness(data: pd.DataFrame) -> dict:
     }
 
 
+def calculate_robust_log_trend(close: pd.Series) -> tuple[pd.DataFrame, dict]:
+    if len(close) < 200 or (close <= 0).any():
+        raise ValueError("稳健长期趋势至少需要 200 个有效正数收盘价")
+    years = (close.index - close.index[0]).days.to_numpy(dtype=float) / 365.25
+    centered_years = years - years.mean()
+    log_close = np.log(close.to_numpy(dtype=float))
+    slope, intercept = np.polyfit(centered_years, log_close, 1)
+    weights = np.ones(len(close))
+    iterations = 0
+    for iterations in range(1, 31):
+        residuals = log_close - (intercept + slope * centered_years)
+        median = np.median(residuals)
+        scale = 1.4826 * np.median(np.abs(residuals - median))
+        if scale <= 1e-12:
+            break
+        distance = np.abs(residuals - median)
+        cutoff = 1.345 * scale
+        weights = np.minimum(1.0, cutoff / np.maximum(distance, 1e-12))
+        new_slope, new_intercept = np.polyfit(
+            centered_years, log_close, 1, w=np.sqrt(weights)
+        )
+        if max(abs(new_slope - slope), abs(new_intercept - intercept)) < 1e-10:
+            slope, intercept = new_slope, new_intercept
+            break
+        slope, intercept = new_slope, new_intercept
+
+    fitted_log = intercept + slope * centered_years
+    residuals = log_close - fitted_log
+    lower_residual, upper_residual = np.quantile(residuals, [0.1, 0.9])
+    fitted = np.exp(fitted_log)
+    trend = pd.DataFrame(
+        {
+            "Robust_Log_Trend": fitted,
+            "Robust_Log_Lower": np.exp(fitted_log + lower_residual),
+            "Robust_Log_Upper": np.exp(fitted_log + upper_residual),
+            "Robust_Log_Deviation_Pct": (close.to_numpy(dtype=float) / fitted - 1) * 100,
+        },
+        index=close.index,
+    )
+    summary = {
+        "method": "Huber IRLS 对数线性回归",
+        "start_date": close.index[0].date().isoformat(),
+        "end_date": close.index[-1].date().isoformat(),
+        "observations": len(close),
+        "annualized_growth_pct": round((math.exp(slope) - 1) * 100, 2),
+        "fitted_close": round(float(fitted[-1]), 2),
+        "lower_band": round(float(trend.iloc[-1]["Robust_Log_Lower"]), 2),
+        "upper_band": round(float(trend.iloc[-1]["Robust_Log_Upper"]), 2),
+        "deviation_pct": round(float(trend.iloc[-1]["Robust_Log_Deviation_Pct"]), 2),
+        "downweighted_pct": round(float((weights < 0.999).mean() * 100), 2),
+        "iterations": iterations,
+    }
+    return trend, summary
+
+
 def calculate_indicators(prices: pd.DataFrame) -> pd.DataFrame:
     data = prices.copy()
     close = data["Close"]
@@ -416,7 +472,12 @@ def calculate_indicators(prices: pd.DataFrame) -> pd.DataFrame:
     data["Distance_EMA200_Pct"] = (close / data["EMA200"] - 1) * 100
     data["Distance_High252_Pct"] = (close / data["High252"] - 1) * 100
     data["Drawdown_Pct"] = (close / close.cummax() - 1) * 100
-    return data.round(4)
+    trend, trend_summary = calculate_robust_log_trend(close)
+    data = data.join(trend)
+    result = data.round(4)
+    result.attrs.update(prices.attrs)
+    result.attrs["robust_log_trend"] = trend_summary
+    return result
 
 
 def validate_history(data: pd.DataFrame) -> None:
@@ -645,6 +706,7 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
         "volatility20_pct": _round_optional(float(latest["Volatility20_Pct"])),
         "drawdown_pct": round(float(latest["Drawdown_Pct"]), 2),
         "max_drawdown_pct": round(float(data["Drawdown_Pct"].min()), 2),
+        "robust_log_trend": data.attrs["robust_log_trend"],
         "status": status,
         "status_detail": status_detail,
         "context": context,
@@ -669,11 +731,13 @@ def deterministic_analysis(snapshot: dict) -> str:
     breadth = context.get("breadth") or {}
     vxn = context.get("vxn") or {}
     treasury = context.get("treasury10y") or {}
+    trend = snapshot["robust_log_trend"]
     return "\n".join(
         [
             f"市场状态：{snapshot['status']}。{snapshot['status_detail']}，当前距 EMA200 {snapshot['distance_ema200_pct']:+.2f}%。",
             f"动量观察：RSI14 为 {snapshot['rsi14']:.2f}，近 20 日年化波动率为 {snapshot['volatility20_pct']:.2f}%。",
             f"风险位置：指数距 52 周高点 {snapshot['distance_high252_pct']:+.2f}%，当前历史高点回撤 {snapshot['drawdown_pct']:.2f}%。",
+            f"长期估值位置：全历史稳健对数趋势点位 {trend['fitted_close']:.2f}，实际点位偏离 {trend['deviation_pct']:+.2f}%，拟合隐含年化增速 {trend['annualized_growth_pct']:.2f}%。",
             f"环境观察：VXN {vxn.get('value', '—')}，10年期美债 {treasury.get('value', '—')}%，成分股位于 EMA200 上方比例 {breadth.get('above_ema200_pct', '—')}%。",
             "条件框架：若价格维持 EMA200 上方且市场广度改善，趋势确认度提高；若跌破 EMA200 并伴随 VXN 上升，则应优先控制风险。仅作数据观察，不构成投资建议。",
         ]
@@ -755,6 +819,10 @@ def export_data(
         "RSI14",
         "Volatility20_Pct",
         "Drawdown_Pct",
+        "Robust_Log_Trend",
+        "Robust_Log_Lower",
+        "Robust_Log_Upper",
+        "Robust_Log_Deviation_Pct",
         "Source",
         "Is_Provisional",
     ]
@@ -769,6 +837,10 @@ def export_data(
                 "rsi14": _json_number(row["RSI14"]),
                 "volatility20_pct": _json_number(row["Volatility20_Pct"]),
                 "drawdown_pct": _json_number(row["Drawdown_Pct"]),
+                "robust_trend": _json_number(row["Robust_Log_Trend"]),
+                "robust_lower": _json_number(row["Robust_Log_Lower"]),
+                "robust_upper": _json_number(row["Robust_Log_Upper"]),
+                "robust_deviation_pct": _json_number(row["Robust_Log_Deviation_Pct"]),
                 "source": str(row["Source"]),
                 "is_provisional": bool(row["Is_Provisional"]),
             }
@@ -886,6 +958,7 @@ def send_email(snapshot: dict, analysis: dict) -> None:
     vxn = (context.get("vxn") or {}).get("value", "—")
     treasury = (context.get("treasury10y") or {}).get("value", "—")
     breadth = (context.get("breadth") or {}).get("above_ema200_pct", "—")
+    trend = snapshot["robust_log_trend"]
     dashboard_url = os.getenv("DASHBOARD_URL")
     content = "\n".join(
         [
@@ -900,6 +973,7 @@ def send_email(snapshot: dict, analysis: dict) -> None:
             f"距52周高点 / 当前回撤：{snapshot['distance_high252_pct']:+.2f}% / {snapshot['drawdown_pct']:.2f}%",
             f"VXN / 10年期美债：{vxn} / {treasury}%",
             f"成分股站上 EMA200：{breadth}%",
+            f"全历史稳健趋势：{trend['fitted_close']:.2f}（偏离 {trend['deviation_pct']:+.2f}%，隐含年化 {trend['annualized_growth_pct']:.2f}%）",
             f"数据来源：{snapshot['provenance']['latest_source']}"
             + ("（临时，待 FRED 校准）" if snapshot['provenance']['latest_is_provisional'] else "（权威）"),
             "",

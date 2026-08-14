@@ -11,6 +11,7 @@ from monitor import (
     build_calibration_audit,
     build_regime_analysis,
     calculate_indicators,
+    calculate_robust_log_trend,
     classify_signal,
     download_history,
     job,
@@ -25,9 +26,22 @@ class MonitorTest(unittest.TestCase):
 
         self.assertEqual(len(data), 300)
         self.assertTrue(
-            {"EMA50", "EMA200", "RSI14", "Volatility20_Pct", "Drawdown_Pct"}.issubset(data.columns)
+            {"EMA50", "EMA200", "RSI14", "Volatility20_Pct", "Drawdown_Pct", "Robust_Log_Trend"}.issubset(data.columns)
         )
         self.assertAlmostEqual(data.iloc[-1]["Drawdown_Pct"], 0)
+        self.assertIn("annualized_growth_pct", data.attrs["robust_log_trend"])
+
+    def test_robust_log_trend_limits_extreme_price_shock(self):
+        index = pd.bdate_range("2000-01-03", periods=5200)
+        years = (index - index[0]).days / 365.25
+        close = pd.Series(100 * (1.08 ** years), index=index)
+        close.iloc[2600:2660] *= 20
+
+        trend, summary = calculate_robust_log_trend(close)
+
+        self.assertAlmostEqual(summary["annualized_growth_pct"], 8, delta=0.15)
+        self.assertAlmostEqual(trend.iloc[-1]["Robust_Log_Deviation_Pct"], 0, delta=0.5)
+        self.assertGreater(summary["downweighted_pct"], 0)
 
     def test_crossing_signal(self):
         previous = pd.Series({"Close": 99, "EMA50": 98, "EMA200": 100})

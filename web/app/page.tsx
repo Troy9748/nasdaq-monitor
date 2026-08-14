@@ -10,6 +10,10 @@ type Point = {
   rsi14: number | null;
   volatility20_pct: number | null;
   drawdown_pct: number | null;
+  robust_trend: number;
+  robust_lower: number;
+  robust_upper: number;
+  robust_deviation_pct: number;
   source: string;
   is_provisional: boolean;
 };
@@ -27,6 +31,18 @@ type Summary = {
   volatility20_pct: number;
   drawdown_pct: number;
   max_drawdown_pct: number;
+  robust_log_trend: {
+    method: string;
+    start_date: string;
+    end_date: string;
+    observations: number;
+    annualized_growth_pct: number;
+    fitted_close: number;
+    lower_band: number;
+    upper_band: number;
+    deviation_pct: number;
+    downweighted_pct: number;
+  };
   status: string;
   status_detail: string;
   alert: { level: string; code: "normal" | "watch" | "important" | "critical"; reasons: string[]; thresholds: Record<string, number> };
@@ -201,6 +217,89 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
       )}
     </div>
   );
+}
+
+function RobustTrendChart({ points }: { points: Point[] }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [hovered, setHovered] = useState<Point | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || points.length < 2) return;
+    const draw = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(bounds.width * ratio));
+      canvas.height = Math.max(1, Math.floor(bounds.height * ratio));
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+
+      const padding = { top: 18, right: 24, bottom: 34, left: 58 };
+      const width = bounds.width - padding.left - padding.right;
+      const height = bounds.height - padding.top - padding.bottom;
+      const values = points.flatMap((point) => [point.close, point.robust_lower, point.robust_upper]);
+      const rawMin = Math.min(...values);
+      const rawMax = Math.max(...values);
+      const margin = (rawMax - rawMin || 1) * 0.06;
+      const min = Math.max(0, rawMin - margin);
+      const max = rawMax + margin;
+      const x = (index: number) => padding.left + (index / (points.length - 1)) * width;
+      const y = (value: number) => padding.top + height - ((value - min) / (max - min)) * height;
+
+      context.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+      context.textAlign = "right";
+      context.textBaseline = "middle";
+      for (let line = 0; line <= 4; line += 1) {
+        const py = padding.top + (height * line) / 4;
+        context.strokeStyle = "rgba(148, 163, 184, 0.13)";
+        context.beginPath();
+        context.moveTo(padding.left, py);
+        context.lineTo(padding.left + width, py);
+        context.stroke();
+        const value = max - ((max - min) * line) / 4;
+        context.fillStyle = "#708099";
+        context.fillText(value >= 10000 ? `${(value / 1000).toFixed(1)}k` : value.toFixed(0), padding.left - 9, py);
+      }
+
+      context.textAlign = "center";
+      context.textBaseline = "top";
+      [0, 0.25, 0.5, 0.75, 1].forEach((fraction) => {
+        const index = Math.min(points.length - 1, Math.round((points.length - 1) * fraction));
+        context.fillStyle = "#708099";
+        context.fillText(points[index].date.slice(0, 7), x(index), padding.top + height + 11);
+      });
+
+      context.fillStyle = "rgba(167, 139, 250, 0.11)";
+      context.beginPath();
+      points.forEach((point, index) => index ? context.lineTo(x(index), y(point.robust_upper)) : context.moveTo(x(index), y(point.robust_upper)));
+      for (let index = points.length - 1; index >= 0; index -= 1) context.lineTo(x(index), y(points[index].robust_lower));
+      context.closePath();
+      context.fill();
+
+      const line = (field: "close" | "robust_trend", color: string, widthPx: number) => {
+        context.strokeStyle = color;
+        context.lineWidth = widthPx;
+        context.lineJoin = "round";
+        context.beginPath();
+        points.forEach((point, index) => index ? context.lineTo(x(index), y(point[field])) : context.moveTo(x(index), y(point[field])));
+        context.stroke();
+      };
+      line("close", "rgba(34, 211, 238, 0.66)", 1.2);
+      line("robust_trend", "#a78bfa", 2.2);
+    };
+    draw();
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [points]);
+
+  return <div className="robust-chart-wrap"><canvas ref={canvasRef} aria-label="NASDAQ-100 全历史稳健增长趋势与实际收盘点位" onMouseLeave={() => setHovered(null)} onMouseMove={(event) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left - 58) / Math.max(1, bounds.width - 82)));
+    setHovered(points[Math.round(ratio * (points.length - 1))]);
+  }} />{hovered && <div className="chart-tooltip" role="status"><span>{hovered.date}</span><strong>{number(hovered.close)}</strong><small>稳健趋势 {number(hovered.robust_trend)} · 偏离 {signed(hovered.robust_deviation_pct)}</small></div>}</div>;
 }
 
 function IndicatorChart({
@@ -389,6 +488,7 @@ export default function Home() {
   }
 
   const summary = market.summary;
+  const robustTrend = summary.robust_log_trend;
   const recent = market.series.slice(-12).reverse();
   const returnCards = [
     ["1个月", summary.returns.one_month],
@@ -448,6 +548,19 @@ export default function Home() {
           <PriceChart points={visiblePoints} logScale={logScale} />
           <div className="timeline-label"><span>防御</span><span>修复</span><span>多头</span></div>
           <RegimeTimeline points={visiblePoints} />
+        </section>
+
+        <section className="robust-trend-panel panel">
+          <div className="section-head"><div><span className="eyebrow">ROBUST GROWTH PATH</span><h2>全历史稳健增长趋势</h2></div><span className="source-chip">1990 至今 · 每日全量重算</span></div>
+          <div className="trend-summary">
+            <p><span>当前拟合点位</span><strong>{number(robustTrend.fitted_close)}</strong><small>实际 {number(summary.close)}</small></p>
+            <p><span>相对趋势偏离</span><strong className={tone(robustTrend.deviation_pct)}>{signed(robustTrend.deviation_pct)}</strong><small>正值高于长期路径</small></p>
+            <p><span>隐含长期年化</span><strong>{number(robustTrend.annualized_growth_pct)}%</strong><small>对数斜率指数还原</small></p>
+            <p><span>经验中枢区间</span><strong>{number(robustTrend.lower_band)}–{number(robustTrend.upper_band)}</strong><small>历史残差 10%–90%</small></p>
+          </div>
+          <div className="legend robust-legend"><span><i className="close-line" />实际收盘</span><span><i className="robust-line" />稳健拟合</span><span><i className="robust-band" />经验区间</span></div>
+          <RobustTrendChart points={market.series} />
+          <p className="method-note">在全部历史收盘价的对数上使用 Huber 迭代加权回归，再指数还原为正常点位。异常偏离会被自动降权（本次 {number(robustTrend.downweighted_pct)}% 样本），以降低泡沫、崩跌等极端阶段对长期斜率的影响；该路径描述长期统计中枢，不是目标价。</p>
         </section>
 
         <section className="risk-panel panel">

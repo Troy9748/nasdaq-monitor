@@ -14,6 +14,9 @@ test("generated data satisfies the dashboard contract", async () => {
   assert.equal(market.latest_date, market.summary.market_date);
   assert.ok(["normal", "watch", "important", "critical"].includes(market.summary.alert.code));
   assert.ok(market.regime_analysis.stats["多头"].forward["60日"].samples > 0);
+  assert.equal(market.summary.robust_log_trend.end_date, market.latest_date);
+  assert.ok(market.summary.robust_log_trend.annualized_growth_pct > 0);
+  assert.ok(market.series.every((point) => point.robust_trend > 0 && point.robust_lower > 0 && point.robust_upper > 0));
   assert.equal(context.series.at(-1).date, market.latest_date);
   assert.equal(analysis.market_date, market.latest_date);
 });
