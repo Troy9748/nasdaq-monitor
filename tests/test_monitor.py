@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -10,12 +11,14 @@ from monitor import (
     build_ai_request,
     build_calibration_audit,
     build_regime_analysis,
+    calculate_asof_robust_log_trend,
     calculate_indicators,
     calculate_robust_log_trend,
     classify_signal,
     download_history,
     job,
     merge_recent_history,
+    parse_and_validate_ai_analysis,
 )
 
 
@@ -42,6 +45,22 @@ class MonitorTest(unittest.TestCase):
         self.assertAlmostEqual(summary["annualized_growth_pct"], 8, delta=0.15)
         self.assertAlmostEqual(trend.iloc[-1]["Robust_Log_Deviation_Pct"], 0, delta=0.5)
         self.assertGreater(summary["downweighted_pct"], 0)
+        self.assertAlmostEqual(summary["central_coverage_pct"], 80, delta=0.2)
+        self.assertTrue(0 < summary["deviation_percentile"] <= 100)
+
+    def test_asof_trend_does_not_change_when_future_data_is_appended(self):
+        index = pd.bdate_range("2000-01-03", periods=800)
+        years = (index - index[0]).days / 365.25
+        close = pd.Series(100 * (1.08 ** years), index=index)
+
+        prefix, _ = calculate_asof_robust_log_trend(close.iloc[:600], min_observations=200)
+        extended = pd.concat([close.iloc[:600], close.iloc[600:] * 8])
+        full, _ = calculate_asof_robust_log_trend(extended, min_observations=200)
+
+        pd.testing.assert_series_equal(
+            prefix["AsOf_Robust_Log_Trend"],
+            full.loc[prefix.index, "AsOf_Robust_Log_Trend"],
+        )
 
     def test_crossing_signal(self):
         previous = pd.Series({"Close": 99, "EMA50": 98, "EMA200": 100})
@@ -79,6 +98,53 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["role"], "user")
         self.assertEqual(payload["thinking"], {"type": "enabled"})
         self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+
+    def test_structured_ai_analysis_validates_fact_values(self):
+        snapshot = {
+            "close": 123.45,
+            "daily_return_pct": 1.2,
+            "ema200": 110.0,
+            "robust_log_trend": {"deviation_pct": 8.0, "deviation_percentile": 72.0},
+        }
+        raw = json.dumps(
+            {
+                "market_state": "趋势保持，但仍需观察数据口径。",
+                "momentum_trend": "动量偏强，结论来自已提供指标。",
+                "risks": "临时数据可能校准，避免外推。",
+                "next_session_watch": "观察趋势与风险条件是否同步变化。",
+                "facts": [
+                    {"metric": "close", "value": 123.45},
+                    {"metric": "daily_return_pct", "value": 1.2},
+                    {"metric": "ema200", "value": 110.0},
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        text = parse_and_validate_ai_analysis(raw, snapshot)
+
+        self.assertIn("事实校验：已核对 3 项", text)
+
+    def test_structured_ai_analysis_rejects_changed_fact(self):
+        snapshot = {"close": 123.45, "daily_return_pct": 1.2, "ema200": 110.0}
+        raw = json.dumps(
+            {
+                "market_state": "状态。",
+                "momentum_trend": "趋势。",
+                "risks": "风险。",
+                "next_session_watch": "观察。",
+                "facts": [
+                    {"metric": "close", "value": 999},
+                    {"metric": "daily_return_pct", "value": 1.2},
+                    {"metric": "ema200", "value": 110.0},
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "数值不一致"):
+            parse_and_validate_ai_analysis(raw, snapshot)
 
     def test_fred_calibration_audits_provisional_rows(self):
         index = pd.to_datetime(["2026-07-10", "2026-07-13"])
@@ -133,6 +199,22 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(alert["level"], "注意")
         self.assertEqual(len(alert["reasons"]), 2)
 
+    @patch.dict("os.environ", {"ALERT_CALIBRATION_DIFF_PCT": "0.5"})
+    def test_calibration_difference_triggers_alert(self):
+        alert = build_alert(
+            {
+                "freshness": {"status": "正常"},
+                "status": "多头趋势",
+                "status_detail": "趋势延续",
+                "volatility20_pct": 20.0,
+                "distance_ema200_pct": 5.0,
+                "context": {"calibration": {"max_abs_diff_pct": 0.8}},
+            }
+        )
+
+        self.assertEqual(alert["level"], "注意")
+        self.assertIn("Yahoo/FRED 校准差异", alert["reasons"][0])
+
     @patch("monitor.download_recent_history")
     @patch("monitor.load_stored_history")
     @patch("monitor.download_fred_history", side_effect=TimeoutError("FRED timeout"))
@@ -163,6 +245,25 @@ class MonitorTest(unittest.TestCase):
         self.assertFalse(job())
         send_email.assert_not_called()
 
+    @patch("monitor.download_history")
+    @patch("monitor.previous_market_date")
+    @patch("monitor.last_scheduled_email_date")
+    def test_scheduled_run_fails_when_cached_market_date_is_severely_stale(
+        self, last_email, previous, download
+    ):
+        end = (pd.Timestamp.now(tz=NEW_YORK) - pd.Timedelta(days=6)).tz_localize(None).normalize()
+        index = pd.bdate_range(end=end, periods=300)
+        download.return_value = pd.DataFrame(
+            {"Close": range(1000, 1300), "Source": "FRED", "Is_Provisional": False},
+            index=index,
+        )
+        previous.return_value = index[-1].date()
+        last_email.return_value = index[-1].date().isoformat()
+
+        with self.assertRaisesRegex(RuntimeError, "连续未取得新行情"):
+            job(scheduled_email=True)
+
+    @patch("monitor.write_health")
     @patch("monitor.send_email")
     @patch("monitor.export_data")
     @patch("monitor.request_ai_analysis", return_value=("analysis", "DeepSeek", "model"))
@@ -170,7 +271,7 @@ class MonitorTest(unittest.TestCase):
     @patch("monitor.download_history")
     @patch("monitor.previous_market_date")
     def test_force_email_sends_once(
-        self, previous, download, _context, _analysis, _export, send_email
+        self, previous, download, _context, _analysis, _export, send_email, _health
     ):
         end = pd.Timestamp.now(tz=NEW_YORK).tz_localize(None).normalize()
         index = pd.bdate_range(end=end, periods=300)

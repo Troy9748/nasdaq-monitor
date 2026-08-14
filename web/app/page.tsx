@@ -14,6 +14,12 @@ type Point = {
   robust_lower: number;
   robust_upper: number;
   robust_deviation_pct: number;
+  robust_percentile: number;
+  asof_robust_trend: number | null;
+  asof_robust_lower: number | null;
+  asof_robust_upper: number | null;
+  asof_robust_deviation_pct: number | null;
+  asof_robust_percentile: number | null;
   source: string;
   is_provisional: boolean;
 };
@@ -41,7 +47,32 @@ type Summary = {
     lower_band: number;
     upper_band: number;
     deviation_pct: number;
+    deviation_percentile: number;
+    central_coverage_pct: number;
+    above_upper_days: number;
+    below_lower_days: number;
     downweighted_pct: number;
+    uncertainty: {
+      method: string;
+      samples: number;
+      block_sessions: number;
+      annualized_growth_ci95_pct: [number, number];
+      fitted_close_ci95: [number, number];
+    };
+  };
+  asof_robust_log_trend: {
+    method: string;
+    training_end: string;
+    fitted_close: number;
+    lower_band: number;
+    upper_band: number;
+    deviation_pct: number;
+    deviation_percentile: number;
+    annualized_growth_pct: number;
+  };
+  trend_model_stability: {
+    windows: Record<string, { start_date: string; observations: number; annualized_growth_pct: number }>;
+    history: Array<{ date: string; annualized_growth_pct: number }>;
   };
   status: string;
   status_detail: string;
@@ -52,7 +83,9 @@ type Summary = {
     latest_is_provisional: boolean;
     authoritative_through: string;
     provisional_rows: number;
+    data_fingerprint_sha256: string;
   };
+  methodology: { trend_model_version: string; full_history_curve_is_descriptive: boolean; asof_curve_uses_future_data: boolean; asof_refit_cadence: string };
   context: {
     vxn: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
     treasury10y: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
@@ -86,14 +119,30 @@ type Analysis = {
   source: string;
   model: string | null;
   text: string;
+  fact_validation?: string;
   disclaimer: string;
 };
 
 type Health = { checked_at: string; data?: { status: string; market_date: string }; ai?: { status: string; source: string; model: string | null }; email?: { status: string; market_date: string }; calibration?: { checked_at: string } | null };
 
 const ranges = { "1年": 252, "3年": 756, "5年": 1260, "10年": 2520, 全部: Infinity } as const;
+const marketEvents = [
+  { date: "2000-03-10", label: "科技泡沫高点" },
+  { date: "2008-09-15", label: "金融危机" },
+  { date: "2020-03-23", label: "疫情冲击" },
+] as const;
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const assetPath = (path: string) => `${basePath}${path}${path.endsWith(".json") ? `?v=${Date.now()}` : ""}`;
+
+function savedRange(key: string, fallback: keyof typeof ranges): keyof typeof ranges {
+  if (typeof window === "undefined") return fallback;
+  const value = new URLSearchParams(window.location.search).get(key);
+  return value && Object.hasOwn(ranges, value) ? value as keyof typeof ranges : fallback;
+}
+
+function savedScale(key: string): boolean {
+  return typeof window !== "undefined" && new URLSearchParams(window.location.search).get(key) === "log";
+}
 
 function signed(value: number | null | undefined, suffix = "%") {
   return value == null ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}${suffix}`;
@@ -108,9 +157,20 @@ function tone(value: number | null | undefined) {
   return value > 0 ? "positive" : "negative";
 }
 
-function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }) {
+type PriceVisibility = { close: boolean; ema50: boolean; ema200: boolean; robust: boolean; band: boolean };
+type TrendVisibility = { close: boolean; robust: boolean; asof: boolean; band: boolean };
+
+function downloadCanvas(canvas: HTMLCanvasElement | null, filename: string) {
+  if (!canvas) return;
+  const link = document.createElement("a");
+  link.download = filename;
+  link.href = canvas.toDataURL("image/png");
+  link.click();
+}
+
+function PriceChart({ points, logScale, visibility }: { points: Point[]; logScale: boolean; visibility: PriceVisibility }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [hovered, setHovered] = useState<Point | null>(null);
+  const [hovered, setHovered] = useState<{ point: Point; x: number } | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -128,7 +188,15 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
       const padding = { top: 24, right: 24, bottom: 34, left: 58 };
       const width = bounds.width - padding.left - padding.right;
       const height = bounds.height - padding.top - padding.bottom;
-      const values = points.flatMap((point) => [point.close, point.ema50, point.ema200, point.robust_lower, point.robust_upper]).filter((v): v is number => v != null && v > 0);
+      const values = points.flatMap((point) => [
+        visibility.close ? point.close : null,
+        visibility.ema50 ? point.ema50 : null,
+        visibility.ema200 ? point.ema200 : null,
+        visibility.band ? point.robust_lower : null,
+        visibility.band ? point.robust_upper : null,
+        visibility.robust ? point.robust_trend : null,
+      ]).filter((v): v is number => v != null && v > 0);
+      if (!values.length) values.push(...points.map((point) => point.close));
       const transformed = values.map((value) => (logScale ? Math.log(value) : value));
       const rawMin = Math.min(...transformed);
       const rawMax = Math.max(...transformed);
@@ -166,12 +234,30 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
         context.fillText(points[index].date.slice(0, 7), x(index), padding.top + height + 11);
       });
 
-      context.fillStyle = "rgba(167, 139, 250, 0.09)";
-      context.beginPath();
-      points.forEach((point, index) => index ? context.lineTo(x(index), y(point.robust_upper)) : context.moveTo(x(index), y(point.robust_upper)));
-      for (let index = points.length - 1; index >= 0; index -= 1) context.lineTo(x(index), y(points[index].robust_lower));
-      context.closePath();
-      context.fill();
+      marketEvents.forEach((event) => {
+        const index = points.findIndex((point) => point.date >= event.date);
+        if (index < 0 || event.date < points[0].date) return;
+        context.save();
+        context.setLineDash([3, 5]);
+        context.strokeStyle = "rgba(148, 163, 184, 0.24)";
+        context.beginPath();
+        context.moveTo(x(index), padding.top);
+        context.lineTo(x(index), padding.top + height);
+        context.stroke();
+        context.restore();
+        context.fillStyle = "#66778a";
+        context.textAlign = "left";
+        context.fillText(event.label, Math.min(x(index) + 4, padding.left + width - 64), padding.top + 4);
+      });
+
+      if (visibility.band) {
+        context.fillStyle = "rgba(167, 139, 250, 0.09)";
+        context.beginPath();
+        points.forEach((point, index) => index ? context.lineTo(x(index), y(point.robust_upper)) : context.moveTo(x(index), y(point.robust_upper)));
+        for (let index = points.length - 1; index >= 0; index -= 1) context.lineTo(x(index), y(points[index].robust_lower));
+        context.closePath();
+        context.fill();
+      }
 
       const line = (key: "close" | "ema50" | "ema200" | "robust_trend", color: string, widthPx: number) => {
         context.strokeStyle = color;
@@ -192,17 +278,17 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
         context.stroke();
       };
 
-      line("ema200", "rgba(245, 158, 11, 0.92)", 1.4);
-      line("ema50", "rgba(167, 139, 250, 0.82)", 1.2);
-      line("robust_trend", "rgba(244, 114, 182, 0.95)", 1.8);
-      line("close", "#22d3ee", 2);
+      if (visibility.ema200) line("ema200", "rgba(245, 158, 11, 0.92)", 1.4);
+      if (visibility.ema50) line("ema50", "rgba(167, 139, 250, 0.82)", 1.2);
+      if (visibility.robust) line("robust_trend", "rgba(244, 114, 182, 0.95)", 1.8);
+      if (visibility.close) line("close", "#22d3ee", 2);
     };
 
     draw();
     const observer = new ResizeObserver(draw);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [points, logScale]);
+  }, [points, logScale, visibility]);
 
   return (
     <div className="chart-wrap">
@@ -213,23 +299,25 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
         onMouseMove={(event) => {
           const bounds = event.currentTarget.getBoundingClientRect();
           const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left - 58) / Math.max(1, bounds.width - 82)));
-          setHovered(points[Math.round(ratio * (points.length - 1))]);
+          setHovered({ point: points[Math.round(ratio * (points.length - 1))], x: event.clientX - bounds.left });
         }}
       />
+      {hovered && <span className="chart-crosshair" style={{ left: hovered.x }} />}
+      <button className="chart-download" onClick={() => downloadCanvas(canvasRef.current, `ndx-price-${points.at(-1)?.date ?? "chart"}.png`)}>下载 PNG</button>
       {hovered && (
         <div className="chart-tooltip" role="status">
-          <span>{hovered.date}</span>
-          <strong>{number(hovered.close)}</strong>
-          <small>EMA200 {number(hovered.ema200)} · 稳健趋势 {number(hovered.robust_trend)}</small>
+          <span>{hovered.point.date}</span>
+          <strong>{number(hovered.point.close)}</strong>
+          <small>EMA200 {number(hovered.point.ema200)} · 稳健趋势 {number(hovered.point.robust_trend)} · 第 {number(hovered.point.robust_percentile)} 百分位</small>
         </div>
       )}
     </div>
   );
 }
 
-function RobustTrendChart({ points, logScale }: { points: Point[]; logScale: boolean }) {
+function RobustTrendChart({ points, logScale, visibility }: { points: Point[]; logScale: boolean; visibility: TrendVisibility }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [hovered, setHovered] = useState<Point | null>(null);
+  const [hovered, setHovered] = useState<{ point: Point; x: number } | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -247,7 +335,14 @@ function RobustTrendChart({ points, logScale }: { points: Point[]; logScale: boo
       const padding = { top: 18, right: 24, bottom: 34, left: 58 };
       const width = bounds.width - padding.left - padding.right;
       const height = bounds.height - padding.top - padding.bottom;
-      const values = points.flatMap((point) => [point.close, point.robust_lower, point.robust_upper]).map((value) => logScale ? Math.log(value) : value);
+      const values = points.flatMap((point) => [
+        visibility.close ? point.close : null,
+        visibility.band ? point.robust_lower : null,
+        visibility.band ? point.robust_upper : null,
+        visibility.robust ? point.robust_trend : null,
+        visibility.asof ? point.asof_robust_trend : null,
+      ]).filter((value): value is number => value != null && value > 0).map((value) => logScale ? Math.log(value) : value);
+      if (!values.length) values.push(...points.map((point) => logScale ? Math.log(point.close) : point.close));
       const rawMin = Math.min(...values);
       const rawMax = Math.max(...values);
       const margin = (rawMax - rawMin || 1) * 0.06;
@@ -280,35 +375,85 @@ function RobustTrendChart({ points, logScale }: { points: Point[]; logScale: boo
         context.fillText(points[index].date.slice(0, 7), x(index), padding.top + height + 11);
       });
 
-      context.fillStyle = "rgba(167, 139, 250, 0.11)";
-      context.beginPath();
-      points.forEach((point, index) => index ? context.lineTo(x(index), y(point.robust_upper)) : context.moveTo(x(index), y(point.robust_upper)));
-      for (let index = points.length - 1; index >= 0; index -= 1) context.lineTo(x(index), y(points[index].robust_lower));
-      context.closePath();
-      context.fill();
+      marketEvents.forEach((event) => {
+        const index = points.findIndex((point) => point.date >= event.date);
+        if (index < 0 || event.date < points[0].date) return;
+        context.save();
+        context.setLineDash([3, 5]);
+        context.strokeStyle = "rgba(148, 163, 184, 0.24)";
+        context.beginPath();
+        context.moveTo(x(index), padding.top);
+        context.lineTo(x(index), padding.top + height);
+        context.stroke();
+        context.restore();
+        context.fillStyle = "#66778a";
+        context.textAlign = "left";
+        context.fillText(event.label, Math.min(x(index) + 4, padding.left + width - 64), padding.top + 4);
+      });
 
-      const line = (field: "close" | "robust_trend", color: string, widthPx: number) => {
+      if (visibility.band) {
+        context.fillStyle = "rgba(167, 139, 250, 0.11)";
+        context.beginPath();
+        points.forEach((point, index) => index ? context.lineTo(x(index), y(point.robust_upper)) : context.moveTo(x(index), y(point.robust_upper)));
+        for (let index = points.length - 1; index >= 0; index -= 1) context.lineTo(x(index), y(points[index].robust_lower));
+        context.closePath();
+        context.fill();
+      }
+
+      const line = (field: "close" | "robust_trend" | "asof_robust_trend", color: string, widthPx: number, dashed = false) => {
+        context.save();
         context.strokeStyle = color;
         context.lineWidth = widthPx;
         context.lineJoin = "round";
+        if (dashed) context.setLineDash([7, 5]);
         context.beginPath();
-        points.forEach((point, index) => index ? context.lineTo(x(index), y(point[field])) : context.moveTo(x(index), y(point[field])));
+        let started = false;
+        points.forEach((point, index) => {
+          const value = point[field];
+          if (value == null || value <= 0) return;
+          if (started) context.lineTo(x(index), y(value));
+          else context.moveTo(x(index), y(value));
+          started = true;
+        });
         context.stroke();
+        context.restore();
       };
-      line("close", "rgba(34, 211, 238, 0.66)", 1.2);
-      line("robust_trend", "#a78bfa", 2.2);
+      if (visibility.close) line("close", "rgba(34, 211, 238, 0.66)", 1.2);
+      if (visibility.robust) line("robust_trend", "#a78bfa", 2.2);
+      if (visibility.asof) line("asof_robust_trend", "#34d399", 1.8, true);
     };
     draw();
     const observer = new ResizeObserver(draw);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [points, logScale]);
+  }, [points, logScale, visibility]);
 
   return <div className="robust-chart-wrap"><canvas ref={canvasRef} aria-label="NASDAQ-100 全历史稳健增长趋势与实际收盘点位" onMouseLeave={() => setHovered(null)} onMouseMove={(event) => {
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left - 58) / Math.max(1, bounds.width - 82)));
-    setHovered(points[Math.round(ratio * (points.length - 1))]);
-  }} />{hovered && <div className="chart-tooltip" role="status"><span>{hovered.date}</span><strong>{number(hovered.close)}</strong><small>稳健趋势 {number(hovered.robust_trend)} · 偏离 {signed(hovered.robust_deviation_pct)}</small></div>}</div>;
+    setHovered({ point: points[Math.round(ratio * (points.length - 1))], x: event.clientX - bounds.left });
+  }} />{hovered && <span className="chart-crosshair" style={{ left: hovered.x }} />}<button className="chart-download" onClick={() => downloadCanvas(canvasRef.current, `ndx-robust-trend-${points.at(-1)?.date ?? "chart"}.png`)}>下载 PNG</button>{hovered && <div className="chart-tooltip" role="status"><span>{hovered.point.date}</span><strong>{number(hovered.point.close)}</strong><small>全历史 {number(hovered.point.robust_trend)} · 无未来数据 {number(hovered.point.asof_robust_trend)} · 第 {number(hovered.point.robust_percentile)} 百分位</small></div>}</div>;
+}
+
+function StabilityChart({ points }: { points: Array<{ date: string; annualized_growth_pct: number }> }) {
+  if (points.length < 2) return null;
+  const values = points.map((point) => point.annualized_growth_pct);
+  const min = Math.min(...values) - 0.5;
+  const max = Math.max(...values) + 0.5;
+  const coordinates = points.map((point, index) => {
+    const x = 3 + (index / (points.length - 1)) * 94;
+    const y = 92 - ((point.annualized_growth_pct - min) / (max - min || 1)) * 84;
+    return `${x},${y}`;
+  }).join(" ");
+  return (
+    <div className="stability-chart" aria-label="历年末全历史稳健年化增速稳定性">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img">
+        <line x1="3" x2="97" y1="92" y2="92" />
+        <polyline points={coordinates} />
+      </svg>
+      <span>{points[0].date.slice(0, 4)}</span><strong>{number(points.at(-1)?.annualized_growth_pct)}%</strong><span>{points.at(-1)?.date.slice(0, 4)}</span>
+    </div>
+  );
 }
 
 function IndicatorChart({
@@ -452,11 +597,22 @@ export default function Home() {
   const [context, setContext] = useState<ContextData | null>(null);
   const [analysisHistory, setAnalysisHistory] = useState<Analysis[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
-  const [range, setRange] = useState<keyof typeof ranges>("5年");
-  const [logScale, setLogScale] = useState(false);
-  const [trendRange, setTrendRange] = useState<keyof typeof ranges>("全部");
-  const [trendLogScale, setTrendLogScale] = useState(false);
+  const [range, setRange] = useState<keyof typeof ranges>(() => savedRange("priceRange", "5年"));
+  const [logScale, setLogScale] = useState(() => savedScale("priceScale"));
+  const [trendRange, setTrendRange] = useState<keyof typeof ranges>(() => savedRange("trendRange", "全部"));
+  const [trendLogScale, setTrendLogScale] = useState(() => savedScale("trendScale"));
+  const [priceVisibility, setPriceVisibility] = useState<PriceVisibility>({ close: true, ema50: true, ema200: true, robust: true, band: true });
+  const [trendVisibility, setTrendVisibility] = useState<TrendVisibility>({ close: true, robust: true, asof: true, band: true });
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    query.set("priceRange", range);
+    query.set("priceScale", logScale ? "log" : "linear");
+    query.set("trendRange", trendRange);
+    query.set("trendScale", trendLogScale ? "log" : "linear");
+    window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
+  }, [range, logScale, trendRange, trendLogScale]);
 
   useEffect(() => {
     Promise.all([
@@ -506,6 +662,9 @@ export default function Home() {
 
   const summary = market.summary;
   const robustTrend = summary.robust_log_trend;
+  const asofTrend = summary.asof_robust_log_trend;
+  const stability = summary.trend_model_stability;
+  const uncertainty = robustTrend.uncertainty;
   const recent = market.series.slice(-12).reverse();
   const returnCards = [
     ["1个月", summary.returns.one_month],
@@ -561,8 +720,14 @@ export default function Home() {
               <button aria-pressed={logScale} className={`scale-button ${logScale ? "active" : ""}`} onClick={() => setLogScale((value) => !value)}>{logScale ? "对数尺度" : "线性尺度"}</button>
             </div>
           </div>
-          <div className="legend"><span><i className="close-line" />收盘</span><span><i className="ema50-line" />EMA50</span><span><i className="ema200-line" />EMA200</span><span><i className="robust-main-line" />稳健拟合</span><span><i className="robust-band" />经验区间</span></div>
-          <PriceChart points={visiblePoints} logScale={logScale} />
+          <div className="legend interactive-legend">
+            <button aria-pressed={priceVisibility.close} onClick={() => setPriceVisibility((value) => ({ ...value, close: !value.close }))}><i className="close-line" />收盘</button>
+            <button aria-pressed={priceVisibility.ema50} onClick={() => setPriceVisibility((value) => ({ ...value, ema50: !value.ema50 }))}><i className="ema50-line" />EMA50</button>
+            <button aria-pressed={priceVisibility.ema200} onClick={() => setPriceVisibility((value) => ({ ...value, ema200: !value.ema200 }))}><i className="ema200-line" />EMA200</button>
+            <button aria-pressed={priceVisibility.robust} onClick={() => setPriceVisibility((value) => ({ ...value, robust: !value.robust }))}><i className="robust-main-line" />稳健拟合</button>
+            <button aria-pressed={priceVisibility.band} onClick={() => setPriceVisibility((value) => ({ ...value, band: !value.band }))}><i className="robust-band" />经验区间</button>
+          </div>
+          <PriceChart points={visiblePoints} logScale={logScale} visibility={priceVisibility} />
           <div className="timeline-label"><span>防御</span><span>修复</span><span>多头</span></div>
           <RegimeTimeline points={visiblePoints} />
         </section>
@@ -580,12 +745,25 @@ export default function Home() {
           <div className="trend-summary">
             <p><span>当前拟合点位</span><strong>{number(robustTrend.fitted_close)}</strong><small>实际 {number(summary.close)}</small></p>
             <p><span>相对趋势偏离</span><strong className={tone(robustTrend.deviation_pct)}>{signed(robustTrend.deviation_pct)}</strong><small>正值高于长期路径</small></p>
-            <p><span>隐含长期年化</span><strong>{number(robustTrend.annualized_growth_pct)}%</strong><small>对数斜率指数还原</small></p>
-            <p><span>经验中枢区间</span><strong>{number(robustTrend.lower_band)}–{number(robustTrend.upper_band)}</strong><small>历史残差 10%–90%</small></p>
+            <p><span>历史偏离百分位</span><strong>第 {number(robustTrend.deviation_percentile)}</strong><small>{robustTrend.above_upper_days ? `连续 ${robustTrend.above_upper_days} 日高于上轨` : robustTrend.below_lower_days ? `连续 ${robustTrend.below_lower_days} 日低于下轨` : "位于中央经验区间"}</small></p>
+            <p><span>隐含长期年化</span><strong>{number(robustTrend.annualized_growth_pct)}%</strong><small>95%：{number(uncertainty.annualized_growth_ci95_pct[0])}%–{number(uncertainty.annualized_growth_ci95_pct[1])}%</small></p>
+            <p><span>经验中枢区间</span><strong>{number(robustTrend.lower_band)}–{number(robustTrend.upper_band)}</strong><small>历史残差 10%–90% · 覆盖 {number(robustTrend.central_coverage_pct)}%</small></p>
+            <p><span>无未来数据趋势</span><strong>{number(asofTrend.fitted_close)}</strong><small>偏离 {signed(asofTrend.deviation_pct)} · 训练至 {asofTrend.training_end}</small></p>
           </div>
-          <div className="legend robust-legend"><span><i className="close-line" />实际收盘</span><span><i className="robust-line" />稳健拟合</span><span><i className="robust-band" />经验区间</span></div>
-          <RobustTrendChart points={visibleTrendPoints} logScale={trendLogScale} />
-          <p className="method-note">拟合始终使用 1990 年以来全部历史，时间按钮只改变显示窗口。在全部历史收盘价的对数上使用 Huber 迭代加权回归，再指数还原为正常点位。异常偏离会被自动降权（本次 {number(robustTrend.downweighted_pct)}% 样本），以降低泡沫、崩跌等极端阶段对长期斜率的影响；该路径描述长期统计中枢，不是目标价。</p>
+          <div className="legend robust-legend interactive-legend">
+            <button aria-pressed={trendVisibility.close} onClick={() => setTrendVisibility((value) => ({ ...value, close: !value.close }))}><i className="close-line" />实际收盘</button>
+            <button aria-pressed={trendVisibility.robust} onClick={() => setTrendVisibility((value) => ({ ...value, robust: !value.robust }))}><i className="robust-line" />全历史拟合</button>
+            <button aria-pressed={trendVisibility.asof} onClick={() => setTrendVisibility((value) => ({ ...value, asof: !value.asof }))}><i className="asof-line" />无未来数据拟合</button>
+            <button aria-pressed={trendVisibility.band} onClick={() => setTrendVisibility((value) => ({ ...value, band: !value.band }))}><i className="robust-band" />经验区间</button>
+          </div>
+          <RobustTrendChart points={visibleTrendPoints} logScale={trendLogScale} visibility={trendVisibility} />
+          <p className="method-note">紫色全历史拟合用于描述长期结构，会使用当前可得的全部数据；绿色虚线在每月首个交易日仅使用截至上月末的数据重估，可用于无前视偏差的历史观察。经验区间是历史残差中央 80%，不是预测区间。异常偏离会被自动降权（本次 {number(robustTrend.downweighted_pct)}% 样本）。</p>
+          <div className="model-validity">
+            <div><span className="eyebrow">MODEL VALIDITY</span><h3>长期斜率稳定性与参数不确定性</h3></div>
+            <div className="stability-windows">{Object.entries(stability.windows).map(([label, item]) => <p key={label}><span>{label}</span><strong>{number(item.annualized_growth_pct)}%</strong><small>{item.start_date} · {item.observations.toLocaleString("zh-CN")} 日</small></p>)}</div>
+            <StabilityChart points={stability.history} />
+            <p className="method-note">年末序列每次只使用当时已有数据；斜率 95% 区间采用 {uncertainty.samples} 次、每块 {uncertainty.block_sessions} 个交易日的移动区块残差 Bootstrap。拟合点位参数区间为 {number(uncertainty.fitted_close_ci95[0])}–{number(uncertainty.fitted_close_ci95[1])}。模型版本 {summary.methodology.trend_model_version}，数据指纹 {summary.provenance.data_fingerprint_sha256.slice(0, 12)}。</p>
+          </div>
         </section>
 
         <section className="risk-panel panel">
@@ -643,7 +821,7 @@ export default function Home() {
         </section>
 
         <section className="ai-panel panel">
-          <div className="section-head"><div><span className="eyebrow">AI RISK BRIEF</span><h2>结构化市场解读</h2></div><span className="source-chip">{analysis.source}{analysis.model ? ` · ${analysis.model}` : ""} · {new Date(analysis.generated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</span></div>
+          <div className="section-head"><div><span className="eyebrow">AI RISK BRIEF</span><h2>结构化市场解读</h2></div><span className="source-chip">{analysis.source}{analysis.model ? ` · ${analysis.model}` : ""} · {analysis.fact_validation === "passed" ? "事实已校验 · " : "规则校验 · "}{new Date(analysis.generated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</span></div>
           <div className="ai-copy">{analysis.text}</div>
           <p className="disclaimer">{analysis.disclaimer}</p>
           {analysisHistory.length > 1 && <details className="analysis-history"><summary>查看历史 AI 分析（{analysisHistory.length} 期）</summary>{analysisHistory.slice(0, -1).reverse().slice(0, 8).map((item) => <article key={item.market_date}><strong>{item.market_date} · {item.source}</strong><p>{item.text}</p></article>)}</details>}

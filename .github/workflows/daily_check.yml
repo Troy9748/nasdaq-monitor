@@ -55,6 +55,7 @@ jobs:
           ALERT_BREADTH_LEVEL: ${{ vars.ALERT_BREADTH_LEVEL }}
           ALERT_VOLATILITY_LEVEL: ${{ vars.ALERT_VOLATILITY_LEVEL }}
           ALERT_EMA_DISTANCE: ${{ vars.ALERT_EMA_DISTANCE }}
+          ALERT_CALIBRATION_DIFF_PCT: ${{ vars.ALERT_CALIBRATION_DIFF_PCT }}
         run: python -u monitor.py ${{ github.event.schedule == '0 22 * * 0' && '--refresh-fred --force --no-email' || github.event.schedule == '0 23 * * 1-5' && '--scheduled-email' || inputs.force_email && '--force' || inputs.force_refresh && '--force --no-email' || '' }}
 
       - name: Commit new market day
@@ -67,3 +68,14 @@ jobs:
             git pull --rebase origin main
             git push origin HEAD:main
           fi
+
+      - name: Notify workflow failure
+        if: ${{ failure() }}
+        continue-on-error: true
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python failure_notify.py

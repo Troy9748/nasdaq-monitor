@@ -70,3 +70,27 @@ jobs:
       - name: Deploy GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify deployed GitHub Pages
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          curl --fail --silent --show-error --output /dev/null --retry 5 --retry-delay 3 --max-time 30 "${PAGE_URL}"
+          curl --fail --silent --show-error --output /dev/null --retry 5 --retry-delay 3 --max-time 30 "${PAGE_URL%/}/data/nasdaq100.json"
+
+  notify-failure:
+    needs: [build, deploy]
+    if: ${{ always() && (needs.build.result == 'failure' || needs.deploy.result == 'failure') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Send failure email
+        continue-on-error: true
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python failure_notify.py

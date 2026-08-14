@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import io
 import json
 import math
@@ -36,6 +37,7 @@ WEB_HEALTH_PATH = WEB_DATA_DIR / "health.json"
 EMAIL_STATE_PATH = WEB_DATA_DIR / "email_state.json"
 WEB_CSV_PATH = WEB_DATA_DIR / CSV_PATH.name
 NEW_YORK = ZoneInfo("America/New_York")
+TREND_MODEL_VERSION = "2026-08-14.2"
 
 
 def fetch_bytes(url: str, timeout: int = 45) -> bytes:
@@ -397,17 +399,12 @@ def build_freshness(data: pd.DataFrame) -> dict:
     }
 
 
-def calculate_robust_log_trend(close: pd.Series) -> tuple[pd.DataFrame, dict]:
-    if len(close) < 200 or (close <= 0).any():
-        raise ValueError("稳健长期趋势至少需要 200 个有效正数收盘价")
-    years = (close.index - close.index[0]).days.to_numpy(dtype=float) / 365.25
-    centered_years = years - years.mean()
-    log_close = np.log(close.to_numpy(dtype=float))
-    slope, intercept = np.polyfit(centered_years, log_close, 1)
-    weights = np.ones(len(close))
+def _huber_fit(x: np.ndarray, y: np.ndarray) -> tuple[float, float, np.ndarray, int]:
+    slope, intercept = np.polyfit(x, y, 1)
+    weights = np.ones(len(y))
     iterations = 0
     for iterations in range(1, 31):
-        residuals = log_close - (intercept + slope * centered_years)
+        residuals = y - (intercept + slope * x)
         median = np.median(residuals)
         scale = 1.4826 * np.median(np.abs(residuals - median))
         if scale <= 1e-12:
@@ -415,44 +412,208 @@ def calculate_robust_log_trend(close: pd.Series) -> tuple[pd.DataFrame, dict]:
         distance = np.abs(residuals - median)
         cutoff = 1.345 * scale
         weights = np.minimum(1.0, cutoff / np.maximum(distance, 1e-12))
-        new_slope, new_intercept = np.polyfit(
-            centered_years, log_close, 1, w=np.sqrt(weights)
-        )
+        new_slope, new_intercept = np.polyfit(x, y, 1, w=np.sqrt(weights))
         if max(abs(new_slope - slope), abs(new_intercept - intercept)) < 1e-10:
             slope, intercept = new_slope, new_intercept
             break
         slope, intercept = new_slope, new_intercept
+    return float(slope), float(intercept), weights, iterations
 
+
+def _fit_robust_log_model(close: pd.Series) -> dict:
+    if len(close) < 200 or (close <= 0).any():
+        raise ValueError("稳健长期趋势至少需要 200 个有效正数收盘价")
+    years = (close.index - close.index[0]).days.to_numpy(dtype=float) / 365.25
+    center_years = float(years.mean())
+    centered_years = years - center_years
+    log_close = np.log(close.to_numpy(dtype=float))
+    slope, intercept, weights, iterations = _huber_fit(centered_years, log_close)
     fitted_log = intercept + slope * centered_years
     residuals = log_close - fitted_log
     lower_residual, upper_residual = np.quantile(residuals, [0.1, 0.9])
+    return {
+        "origin": close.index[0],
+        "center_years": center_years,
+        "slope": slope,
+        "intercept": intercept,
+        "weights": weights,
+        "iterations": iterations,
+        "fitted_log": fitted_log,
+        "residuals": residuals,
+        "lower_residual": float(lower_residual),
+        "upper_residual": float(upper_residual),
+    }
+
+
+def _predict_robust_log(model: dict, index: pd.Index) -> np.ndarray:
+    years = (index - model["origin"]).days.to_numpy(dtype=float) / 365.25
+    return model["intercept"] + model["slope"] * (years - model["center_years"])
+
+
+def _percentile(values: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    ordered = np.sort(reference)
+    return np.searchsorted(ordered, values, side="right") / len(ordered) * 100
+
+
+def _consecutive_true(values: np.ndarray) -> int:
+    count = 0
+    for value in values[::-1]:
+        if not value:
+            break
+        count += 1
+    return count
+
+
+def calculate_robust_log_trend(close: pd.Series) -> tuple[pd.DataFrame, dict]:
+    model = _fit_robust_log_model(close)
+    fitted_log = model["fitted_log"]
+    residuals = model["residuals"]
     fitted = np.exp(fitted_log)
+    lower = np.exp(fitted_log + model["lower_residual"])
+    upper = np.exp(fitted_log + model["upper_residual"])
     trend = pd.DataFrame(
         {
             "Robust_Log_Trend": fitted,
-            "Robust_Log_Lower": np.exp(fitted_log + lower_residual),
-            "Robust_Log_Upper": np.exp(fitted_log + upper_residual),
+            "Robust_Log_Lower": lower,
+            "Robust_Log_Upper": upper,
             "Robust_Log_Deviation_Pct": (close.to_numpy(dtype=float) / fitted - 1) * 100,
+            "Robust_Log_Percentile": _percentile(residuals, residuals),
         },
         index=close.index,
     )
     summary = {
         "method": "Huber IRLS 对数线性回归",
+        "model_version": TREND_MODEL_VERSION,
         "start_date": close.index[0].date().isoformat(),
         "end_date": close.index[-1].date().isoformat(),
         "observations": len(close),
-        "annualized_growth_pct": round((math.exp(slope) - 1) * 100, 2),
+        "annualized_growth_pct": round((math.exp(model["slope"]) - 1) * 100, 2),
         "fitted_close": round(float(fitted[-1]), 2),
         "lower_band": round(float(trend.iloc[-1]["Robust_Log_Lower"]), 2),
         "upper_band": round(float(trend.iloc[-1]["Robust_Log_Upper"]), 2),
         "deviation_pct": round(float(trend.iloc[-1]["Robust_Log_Deviation_Pct"]), 2),
-        "downweighted_pct": round(float((weights < 0.999).mean() * 100), 2),
-        "iterations": iterations,
+        "deviation_percentile": round(float(trend.iloc[-1]["Robust_Log_Percentile"]), 2),
+        "central_coverage_pct": round(float(((close >= lower) & (close <= upper)).mean() * 100), 2),
+        "above_upper_days": _consecutive_true((close.to_numpy(dtype=float) > upper)),
+        "below_lower_days": _consecutive_true((close.to_numpy(dtype=float) < lower)),
+        "lower_multiplier": round(math.exp(model["lower_residual"]), 4),
+        "upper_multiplier": round(math.exp(model["upper_residual"]), 4),
+        "downweighted_pct": round(float((model["weights"] < 0.999).mean() * 100), 2),
+        "iterations": model["iterations"],
     }
     return trend, summary
 
 
-def calculate_indicators(prices: pd.DataFrame) -> pd.DataFrame:
+def calculate_asof_robust_log_trend(
+    close: pd.Series, min_observations: int = 1260
+) -> tuple[pd.DataFrame, dict]:
+    columns = [
+        "AsOf_Robust_Log_Trend",
+        "AsOf_Robust_Log_Lower",
+        "AsOf_Robust_Log_Upper",
+        "AsOf_Robust_Log_Deviation_Pct",
+        "AsOf_Robust_Log_Percentile",
+    ]
+    result = pd.DataFrame(np.nan, index=close.index, columns=columns)
+    months = close.index.to_period("M")
+    latest_model = None
+    latest_training_end = None
+    for month in months.unique():
+        positions = np.flatnonzero(months == month)
+        start = int(positions[0])
+        if start < min_observations:
+            continue
+        training = close.iloc[:start]
+        model = _fit_robust_log_model(training)
+        target_index = close.index[positions]
+        fitted_log = _predict_robust_log(model, target_index)
+        actual_log = np.log(close.iloc[positions].to_numpy(dtype=float))
+        fitted = np.exp(fitted_log)
+        result.iloc[positions] = np.column_stack(
+            [
+                fitted,
+                np.exp(fitted_log + model["lower_residual"]),
+                np.exp(fitted_log + model["upper_residual"]),
+                (close.iloc[positions].to_numpy(dtype=float) / fitted - 1) * 100,
+                _percentile(actual_log - fitted_log, model["residuals"]),
+            ]
+        )
+        latest_model = model
+        latest_training_end = training.index[-1]
+    latest = result.iloc[-1]
+    summary = {
+        "method": "月度扩展窗口 Huber 对数线性回归",
+        "model_version": TREND_MODEL_VERSION,
+        "minimum_observations": min_observations,
+        "training_end": latest_training_end.date().isoformat() if latest_training_end is not None else None,
+        "fitted_close": _round_optional(float(latest["AsOf_Robust_Log_Trend"])),
+        "lower_band": _round_optional(float(latest["AsOf_Robust_Log_Lower"])),
+        "upper_band": _round_optional(float(latest["AsOf_Robust_Log_Upper"])),
+        "deviation_pct": _round_optional(float(latest["AsOf_Robust_Log_Deviation_Pct"])),
+        "deviation_percentile": _round_optional(float(latest["AsOf_Robust_Log_Percentile"])),
+        "annualized_growth_pct": _round_optional(
+            (math.exp(latest_model["slope"]) - 1) * 100 if latest_model else None
+        ),
+    }
+    return result, summary
+
+
+def calculate_model_stability(close: pd.Series) -> dict:
+    latest = close.index[-1]
+    windows = {}
+    for label, years in (("10年", 10), ("15年", 15), ("20年", 20), ("全历史", None)):
+        sample = close if years is None else close[close.index >= latest - pd.DateOffset(years=years)]
+        model = _fit_robust_log_model(sample)
+        windows[label] = {
+            "start_date": sample.index[0].date().isoformat(),
+            "observations": len(sample),
+            "annualized_growth_pct": round((math.exp(model["slope"]) - 1) * 100, 2),
+        }
+    history = []
+    for _, yearly in close.groupby(close.index.year):
+        end = yearly.index[-1]
+        sample = close.loc[:end]
+        if len(sample) < 1260:
+            continue
+        model = _fit_robust_log_model(sample)
+        history.append(
+            {
+                "date": end.date().isoformat(),
+                "annualized_growth_pct": round((math.exp(model["slope"]) - 1) * 100, 4),
+            }
+        )
+    return {"windows": windows, "history": history}
+
+
+def calculate_trend_uncertainty(close: pd.Series, samples: int = 200, block_sessions: int = 20) -> dict:
+    model = _fit_robust_log_model(close)
+    residuals = model["residuals"]
+    x = (close.index - close.index[0]).days.to_numpy(dtype=float) / 365.25
+    x -= x.mean()
+    rng = np.random.default_rng(9748)
+    slopes = np.empty(samples)
+    latest_fits = np.empty(samples)
+    blocks = math.ceil(len(close) / block_sessions)
+    offsets = np.arange(block_sessions)
+    for iteration in range(samples):
+        starts = rng.integers(0, len(close), size=blocks)
+        indices = ((starts[:, None] + offsets) % len(close)).ravel()[: len(close)]
+        boot_y = model["fitted_log"] + residuals[indices]
+        slope, intercept, _, _ = _huber_fit(x, boot_y)
+        slopes[iteration] = (math.exp(slope) - 1) * 100
+        latest_fits[iteration] = math.exp(intercept + slope * x[-1])
+    growth_low, growth_high = np.quantile(slopes, [0.025, 0.975])
+    fit_low, fit_high = np.quantile(latest_fits, [0.025, 0.975])
+    return {
+        "method": "20交易日移动区块残差 Bootstrap",
+        "samples": samples,
+        "block_sessions": block_sessions,
+        "annualized_growth_ci95_pct": [round(float(growth_low), 2), round(float(growth_high), 2)],
+        "fitted_close_ci95": [round(float(fit_low), 2), round(float(fit_high), 2)],
+    }
+
+
+def calculate_indicators(prices: pd.DataFrame, *, advanced: bool = False) -> pd.DataFrame:
     data = prices.copy()
     close = data["Close"]
     daily_return = close.pct_change()
@@ -474,9 +635,16 @@ def calculate_indicators(prices: pd.DataFrame) -> pd.DataFrame:
     data["Drawdown_Pct"] = (close / close.cummax() - 1) * 100
     trend, trend_summary = calculate_robust_log_trend(close)
     data = data.join(trend)
+    if advanced:
+        asof_trend, asof_summary = calculate_asof_robust_log_trend(close)
+        data = data.join(asof_trend)
+        trend_summary["uncertainty"] = calculate_trend_uncertainty(close)
     result = data.round(4)
     result.attrs.update(prices.attrs)
     result.attrs["robust_log_trend"] = trend_summary
+    if advanced:
+        result.attrs["asof_robust_log_trend"] = asof_summary
+        result.attrs["trend_model_stability"] = calculate_model_stability(close)
     return result
 
 
@@ -648,6 +816,7 @@ def build_alert(snapshot: dict) -> dict:
         "breadth": env_float("ALERT_BREADTH_LEVEL", 40),
         "volatility": env_float("ALERT_VOLATILITY_LEVEL", 35),
         "ema_distance": env_float("ALERT_EMA_DISTANCE", 1, maximum=20),
+        "calibration_diff": env_float("ALERT_CALIBRATION_DIFF_PCT", 0.5, maximum=20),
     }
     reasons = []
     level = "日常"
@@ -659,6 +828,7 @@ def build_alert(snapshot: dict) -> dict:
     context = snapshot.get("context", {})
     vxn = (context.get("vxn") or {}).get("value")
     breadth = (context.get("breadth") or {}).get("above_ema200_pct")
+    calibration_diff = (context.get("calibration") or {}).get("max_abs_diff_pct")
     if vxn is not None and vxn >= thresholds["vxn"]:
         reasons.append(f"VXN 升至 {vxn:.2f}")
     if breadth is not None and breadth < thresholds["breadth"]:
@@ -667,6 +837,8 @@ def build_alert(snapshot: dict) -> dict:
         reasons.append(f"20日年化波动率升至 {snapshot['volatility20_pct']:.2f}%")
     if abs(snapshot.get("distance_ema200_pct", 100)) <= thresholds["ema_distance"]:
         reasons.append(f"距 EMA200 仅 {snapshot['distance_ema200_pct']:+.2f}%")
+    if calibration_diff is not None and calibration_diff > thresholds["calibration_diff"]:
+        reasons.append(f"Yahoo/FRED 校准差异升至 {calibration_diff:.4f}%")
     if reasons and level == "日常":
         level = "注意"
     return {
@@ -686,6 +858,9 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
     ytd_base = float(year_start.iloc[-1]) if not year_start.empty else float(close.iloc[0])
     years = max((data.index[-1] - data.index[0]).days / 365.25, 1)
     status, status_detail = classify_signal(latest, previous)
+    fingerprint = hashlib.sha256(
+        data[["Close", "Source", "Is_Provisional"]].to_csv(float_format="%.4f").encode()
+    ).hexdigest()
 
     snapshot = {
         "market_date": market_date.isoformat(),
@@ -707,6 +882,8 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
         "drawdown_pct": round(float(latest["Drawdown_Pct"]), 2),
         "max_drawdown_pct": round(float(data["Drawdown_Pct"].min()), 2),
         "robust_log_trend": data.attrs["robust_log_trend"],
+        "asof_robust_log_trend": data.attrs.get("asof_robust_log_trend"),
+        "trend_model_stability": data.attrs.get("trend_model_stability"),
         "status": status,
         "status_detail": status_detail,
         "context": context,
@@ -716,6 +893,13 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
             "latest_is_provisional": bool(latest["Is_Provisional"]),
             "authoritative_through": data.loc[~data["Is_Provisional"].astype(bool)].index[-1].date().isoformat(),
             "provisional_rows": int(data["Is_Provisional"].astype(bool).sum()),
+            "data_fingerprint_sha256": fingerprint,
+        },
+        "methodology": {
+            "trend_model_version": TREND_MODEL_VERSION,
+            "full_history_curve_is_descriptive": True,
+            "asof_curve_uses_future_data": False,
+            "asof_refit_cadence": "每月首个交易日使用截至上月末的数据重估",
         },
     }
     snapshot["alert"] = build_alert(snapshot)
@@ -732,12 +916,13 @@ def deterministic_analysis(snapshot: dict) -> str:
     vxn = context.get("vxn") or {}
     treasury = context.get("treasury10y") or {}
     trend = snapshot["robust_log_trend"]
+    asof = snapshot.get("asof_robust_log_trend") or {}
     return "\n".join(
         [
             f"市场状态：{snapshot['status']}。{snapshot['status_detail']}，当前距 EMA200 {snapshot['distance_ema200_pct']:+.2f}%。",
             f"动量观察：RSI14 为 {snapshot['rsi14']:.2f}，近 20 日年化波动率为 {snapshot['volatility20_pct']:.2f}%。",
             f"风险位置：指数距 52 周高点 {snapshot['distance_high252_pct']:+.2f}%，当前历史高点回撤 {snapshot['drawdown_pct']:.2f}%。",
-            f"长期估值位置：全历史稳健对数趋势点位 {trend['fitted_close']:.2f}，实际点位偏离 {trend['deviation_pct']:+.2f}%，拟合隐含年化增速 {trend['annualized_growth_pct']:.2f}%。",
+            f"长期位置：全历史稳健趋势偏离 {trend['deviation_pct']:+.2f}%、处于历史第 {trend['deviation_percentile']:.2f} 百分位；无未来数据月度趋势偏离 {asof.get('deviation_pct', float('nan')):+.2f}%。",
             f"环境观察：VXN {vxn.get('value', '—')}，10年期美债 {treasury.get('value', '—')}%，成分股位于 EMA200 上方比例 {breadth.get('above_ema200_pct', '—')}%。",
             "条件框架：若价格维持 EMA200 上方且市场广度改善，趋势确认度提高；若跌破 EMA200 并伴随 VXN 上升，则应优先控制风险。仅作数据观察，不构成投资建议。",
         ]
@@ -755,20 +940,92 @@ def build_ai_request(snapshot: dict) -> tuple[str, dict, str, str]:
                 "role": "system",
                 "content": (
                     "你是一名审慎的市场数据分析员。只能使用用户提供的 NASDAQ-100 指标，不得虚构新闻、宏观事件或实时信息。"
-                    "用中文输出四个短段落：市场状态、动量与趋势、主要风险、下一交易日观察点。"
+                    "只返回 JSON 对象，字段必须是 market_state、momentum_trend、risks、next_session_watch 和 facts。"
+                    "前四项是中文短段落；facts 是3至6项数组，每项仅含 metric 和 value。"
+                    "JSON 格式示例：{\"market_state\":\"文字\",\"momentum_trend\":\"文字\",\"risks\":\"文字\","
+                    "\"next_session_watch\":\"文字\",\"facts\":[{\"metric\":\"close\",\"value\":0}]}；"
+                    "示例中的0必须替换为输入里的精确值，且 facts 必须扩展到3至6项。"
+                    "metric 只能选 close、daily_return_pct、ema50、ema200、rsi14、volatility20_pct、drawdown_pct、"
+                    "robust_log_trend.deviation_pct、robust_log_trend.deviation_percentile、"
+                    "asof_robust_log_trend.deviation_pct、context.vxn.value、context.treasury10y.value、"
+                    "context.breadth.above_ema200_pct；value 必须与输入完全一致。"
                     "区分事实与推断，只提供条件化风险管理框架，不给出绝对买入、卖出、重仓或清仓指令。"
-                    "明确指出数据来源与临时数据的局限，结尾注明不构成投资建议。"
+                    "不得在文字段落中增加输入以外的数字、日期或阈值；明确指出临时数据局限。"
                 ),
             },
             {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
         ],
         "max_tokens": 2000,
         "stream": False,
+        "response_format": {"type": "json_object"},
     }
     if provider == "DeepSeek":
         payload["thinking"] = {"type": "enabled"}
         payload["reasoning_effort"] = "high"
     return f"{base_url}/chat/completions", payload, model, provider
+
+
+AI_SECTION_LABELS = {
+    "market_state": "市场状态",
+    "momentum_trend": "动量与趋势",
+    "risks": "主要风险",
+    "next_session_watch": "下一交易日观察点",
+}
+
+
+def _snapshot_fact_values(snapshot: dict) -> dict[str, float]:
+    def nested(path: str):
+        value = snapshot
+        for key in path.split("."):
+            value = (value or {}).get(key)
+        return value
+
+    paths = [
+        "close",
+        "daily_return_pct",
+        "ema50",
+        "ema200",
+        "rsi14",
+        "volatility20_pct",
+        "drawdown_pct",
+        "robust_log_trend.deviation_pct",
+        "robust_log_trend.deviation_percentile",
+        "asof_robust_log_trend.deviation_pct",
+        "context.vxn.value",
+        "context.treasury10y.value",
+        "context.breadth.above_ema200_pct",
+    ]
+    return {path: float(value) for path in paths if (value := nested(path)) is not None}
+
+
+def parse_and_validate_ai_analysis(raw: str, snapshot: dict) -> str:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    result = json.loads(cleaned)
+    if not isinstance(result, dict) or any(not str(result.get(key, "")).strip() for key in AI_SECTION_LABELS):
+        raise ValueError("AI JSON 缺少分析段落")
+    combined = " ".join(str(result[key]) for key in AI_SECTION_LABELS)
+    forbidden = ("立即买入", "立即卖出", "满仓", "清仓", "保证上涨", "保证下跌")
+    if any(term in combined for term in forbidden):
+        raise ValueError("AI 输出包含绝对交易指令")
+    allowed = _snapshot_fact_values(snapshot)
+    facts = result.get("facts")
+    if not isinstance(facts, list) or not 3 <= len(facts) <= 6:
+        raise ValueError("AI facts 数量无效")
+    checked = []
+    for fact in facts:
+        metric = fact.get("metric") if isinstance(fact, dict) else None
+        if metric not in allowed:
+            raise ValueError(f"AI 使用了未授权指标: {metric}")
+        value = float(fact.get("value"))
+        if not math.isclose(value, allowed[metric], rel_tol=0, abs_tol=0.011):
+            raise ValueError(f"AI 指标数值不一致: {metric}")
+        checked.append(metric)
+    return "\n".join(
+        [f"{label}：{str(result[key]).strip()}" for key, label in AI_SECTION_LABELS.items()]
+        + [f"事实校验：已核对 {len(checked)} 项结构化指标；仅供数据研究，不构成投资建议。"]
+    )
 
 
 def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
@@ -786,9 +1043,10 @@ def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             result = json.load(response)
-        text = result["choices"][0]["message"]["content"].strip()
-        if not text:
+        raw = result["choices"][0]["message"]["content"].strip()
+        if not raw:
             raise RuntimeError(f"{provider} 响应中没有文本内容")
+        text = parse_and_validate_ai_analysis(raw, snapshot)
         return text, provider, model
     except (OSError, urllib.error.HTTPError, ValueError, KeyError, RuntimeError) as error:
         print(f"⚠️ AI 分析不可用，改用规则分析: {error}")
@@ -823,6 +1081,12 @@ def export_data(
         "Robust_Log_Lower",
         "Robust_Log_Upper",
         "Robust_Log_Deviation_Pct",
+        "Robust_Log_Percentile",
+        "AsOf_Robust_Log_Trend",
+        "AsOf_Robust_Log_Lower",
+        "AsOf_Robust_Log_Upper",
+        "AsOf_Robust_Log_Deviation_Pct",
+        "AsOf_Robust_Log_Percentile",
         "Source",
         "Is_Provisional",
     ]
@@ -841,6 +1105,12 @@ def export_data(
                 "robust_lower": _json_number(row["Robust_Log_Lower"]),
                 "robust_upper": _json_number(row["Robust_Log_Upper"]),
                 "robust_deviation_pct": _json_number(row["Robust_Log_Deviation_Pct"]),
+                "robust_percentile": _json_number(row["Robust_Log_Percentile"]),
+                "asof_robust_trend": _json_number(row["AsOf_Robust_Log_Trend"]),
+                "asof_robust_lower": _json_number(row["AsOf_Robust_Log_Lower"]),
+                "asof_robust_upper": _json_number(row["AsOf_Robust_Log_Upper"]),
+                "asof_robust_deviation_pct": _json_number(row["AsOf_Robust_Log_Deviation_Pct"]),
+                "asof_robust_percentile": _json_number(row["AsOf_Robust_Log_Percentile"]),
                 "source": str(row["Source"]),
                 "is_provisional": bool(row["Is_Provisional"]),
             }
@@ -959,6 +1229,8 @@ def send_email(snapshot: dict, analysis: dict) -> None:
     treasury = (context.get("treasury10y") or {}).get("value", "—")
     breadth = (context.get("breadth") or {}).get("above_ema200_pct", "—")
     trend = snapshot["robust_log_trend"]
+    asof = snapshot.get("asof_robust_log_trend") or {}
+    uncertainty = trend.get("uncertainty") or {}
     dashboard_url = os.getenv("DASHBOARD_URL")
     content = "\n".join(
         [
@@ -973,7 +1245,9 @@ def send_email(snapshot: dict, analysis: dict) -> None:
             f"距52周高点 / 当前回撤：{snapshot['distance_high252_pct']:+.2f}% / {snapshot['drawdown_pct']:.2f}%",
             f"VXN / 10年期美债：{vxn} / {treasury}%",
             f"成分股站上 EMA200：{breadth}%",
-            f"全历史稳健趋势：{trend['fitted_close']:.2f}（偏离 {trend['deviation_pct']:+.2f}%，隐含年化 {trend['annualized_growth_pct']:.2f}%）",
+            f"全历史稳健趋势：{trend['fitted_close']:.2f}（偏离 {trend['deviation_pct']:+.2f}%，历史第 {trend['deviation_percentile']:.2f} 百分位）",
+            f"无未来数据趋势：{asof.get('fitted_close', '—')}（偏离 {asof.get('deviation_pct', '—')}%，训练截至 {asof.get('training_end', '—')}）",
+            f"长期年化：{trend['annualized_growth_pct']:.2f}%（Bootstrap 95% 区间 {uncertainty.get('annualized_growth_ci95_pct', ['—', '—'])[0]}%–{uncertainty.get('annualized_growth_ci95_pct', ['—', '—'])[1]}%）",
             f"数据来源：{snapshot['provenance']['latest_source']}"
             + ("（临时，待 FRED 校准）" if snapshot['provenance']['latest_is_provisional'] else "（权威）"),
             "",
@@ -1011,14 +1285,16 @@ def job(
 ) -> bool:
     old_date = previous_market_date()
     print(f"正在更新 {MARKET_NAME} ({TICKER})：历史基准 + Yahoo 最新交易日...")
-    data = calculate_indicators(download_history(refresh_fred=refresh_fred))
+    data = calculate_indicators(download_history(refresh_fred=refresh_fred), advanced=True)
     validate_history(data)
     freshness = build_freshness(data)
     latest_date = data.index[-1].date()
     has_new_market_day = old_date is None or latest_date > old_date
     if scheduled_email and last_scheduled_email_date() == latest_date.isoformat():
+        if freshness["status"] == "严重过期":
+            raise RuntimeError(f"定时任务连续未取得新行情，最新仍为 {latest_date}")
         write_health(
-            data={"status": "正常", "market_date": latest_date.isoformat()},
+            data={"status": freshness["status"], "market_date": latest_date.isoformat()},
             email={"status": "已发送", "market_date": latest_date.isoformat()},
         )
         print(f"{latest_date} 的定时日报已经发送，跳过重复邮件")
@@ -1047,6 +1323,7 @@ def job(
         not os.getenv("OPENAI_API_KEY")
         and previous_analysis.get("market_date") == snapshot["market_date"]
         and previous_analysis.get("source") not in {"规则分析", "规则分析（AI 回退）"}
+        and previous_analysis.get("fact_validation") == "passed"
     )
     if reused_analysis:
         text = previous_analysis["text"]
@@ -1062,16 +1339,19 @@ def job(
         "source": source,
         "model": model,
         "text": text,
+        "fact_validation": "passed" if source not in {"规则分析", "规则分析（AI 回退）"} else "deterministic",
         "disclaimer": "仅供数据研究与市场观察，不构成投资建议。",
     }
     print(f"✅ 分析来源: {source}" + (f" ({model})" if model else ""))
     export_data(data, snapshot, analysis, context_history, context, regime_analysis)
-    write_health(
-        data={"status": freshness["status"], "market_date": snapshot["market_date"]},
-        ai={"status": "正常" if source not in {"规则分析", "规则分析（AI 回退）"} else "回退", "source": source, "model": model},
-        calibration=context.get("calibration"),
-        email={"status": "待发送" if send_mail else "本次禁用", "market_date": snapshot["market_date"]},
-    )
+    health_updates = {
+        "data": {"status": freshness["status"], "market_date": snapshot["market_date"]},
+        "ai": {"status": "正常" if source not in {"规则分析", "规则分析（AI 回退）"} else "回退", "source": source, "model": model},
+        "calibration": context.get("calibration"),
+    }
+    if send_mail:
+        health_updates["email"] = {"status": "待发送", "market_date": snapshot["market_date"]}
+    write_health(**health_updates)
     print(f"✅ 已更新至 {latest_date}，共 {len(data)} 个交易日")
     if send_mail:
         try:
