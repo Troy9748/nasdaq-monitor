@@ -128,7 +128,7 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
       const padding = { top: 24, right: 24, bottom: 34, left: 58 };
       const width = bounds.width - padding.left - padding.right;
       const height = bounds.height - padding.top - padding.bottom;
-      const values = points.flatMap((point) => [point.close, point.ema50, point.ema200]).filter((v): v is number => v != null && v > 0);
+      const values = points.flatMap((point) => [point.close, point.ema50, point.ema200, point.robust_lower, point.robust_upper]).filter((v): v is number => v != null && v > 0);
       const transformed = values.map((value) => (logScale ? Math.log(value) : value));
       const rawMin = Math.min(...transformed);
       const rawMax = Math.max(...transformed);
@@ -166,7 +166,14 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
         context.fillText(points[index].date.slice(0, 7), x(index), padding.top + height + 11);
       });
 
-      const line = (key: "close" | "ema50" | "ema200", color: string, widthPx: number) => {
+      context.fillStyle = "rgba(167, 139, 250, 0.09)";
+      context.beginPath();
+      points.forEach((point, index) => index ? context.lineTo(x(index), y(point.robust_upper)) : context.moveTo(x(index), y(point.robust_upper)));
+      for (let index = points.length - 1; index >= 0; index -= 1) context.lineTo(x(index), y(points[index].robust_lower));
+      context.closePath();
+      context.fill();
+
+      const line = (key: "close" | "ema50" | "ema200" | "robust_trend", color: string, widthPx: number) => {
         context.strokeStyle = color;
         context.lineWidth = widthPx;
         context.lineJoin = "round";
@@ -187,6 +194,7 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
 
       line("ema200", "rgba(245, 158, 11, 0.92)", 1.4);
       line("ema50", "rgba(167, 139, 250, 0.82)", 1.2);
+      line("robust_trend", "rgba(244, 114, 182, 0.95)", 1.8);
       line("close", "#22d3ee", 2);
     };
 
@@ -212,14 +220,14 @@ function PriceChart({ points, logScale }: { points: Point[]; logScale: boolean }
         <div className="chart-tooltip" role="status">
           <span>{hovered.date}</span>
           <strong>{number(hovered.close)}</strong>
-          <small>EMA200 {number(hovered.ema200)}</small>
+          <small>EMA200 {number(hovered.ema200)} · 稳健趋势 {number(hovered.robust_trend)}</small>
         </div>
       )}
     </div>
   );
 }
 
-function RobustTrendChart({ points }: { points: Point[] }) {
+function RobustTrendChart({ points, logScale }: { points: Point[]; logScale: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hovered, setHovered] = useState<Point | null>(null);
 
@@ -239,14 +247,14 @@ function RobustTrendChart({ points }: { points: Point[] }) {
       const padding = { top: 18, right: 24, bottom: 34, left: 58 };
       const width = bounds.width - padding.left - padding.right;
       const height = bounds.height - padding.top - padding.bottom;
-      const values = points.flatMap((point) => [point.close, point.robust_lower, point.robust_upper]);
+      const values = points.flatMap((point) => [point.close, point.robust_lower, point.robust_upper]).map((value) => logScale ? Math.log(value) : value);
       const rawMin = Math.min(...values);
       const rawMax = Math.max(...values);
       const margin = (rawMax - rawMin || 1) * 0.06;
-      const min = Math.max(0, rawMin - margin);
+      const min = logScale ? rawMin - margin : Math.max(0, rawMin - margin);
       const max = rawMax + margin;
       const x = (index: number) => padding.left + (index / (points.length - 1)) * width;
-      const y = (value: number) => padding.top + height - ((value - min) / (max - min)) * height;
+      const y = (value: number) => padding.top + height - (((logScale ? Math.log(value) : value) - min) / (max - min)) * height;
 
       context.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
       context.textAlign = "right";
@@ -258,7 +266,8 @@ function RobustTrendChart({ points }: { points: Point[] }) {
         context.moveTo(padding.left, py);
         context.lineTo(padding.left + width, py);
         context.stroke();
-        const value = max - ((max - min) * line) / 4;
+        const transformedValue = max - ((max - min) * line) / 4;
+        const value = logScale ? Math.exp(transformedValue) : transformedValue;
         context.fillStyle = "#708099";
         context.fillText(value >= 10000 ? `${(value / 1000).toFixed(1)}k` : value.toFixed(0), padding.left - 9, py);
       }
@@ -293,7 +302,7 @@ function RobustTrendChart({ points }: { points: Point[] }) {
     const observer = new ResizeObserver(draw);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [points]);
+  }, [points, logScale]);
 
   return <div className="robust-chart-wrap"><canvas ref={canvasRef} aria-label="NASDAQ-100 全历史稳健增长趋势与实际收盘点位" onMouseLeave={() => setHovered(null)} onMouseMove={(event) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -445,6 +454,8 @@ export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
   const [range, setRange] = useState<keyof typeof ranges>("5年");
   const [logScale, setLogScale] = useState(false);
+  const [trendRange, setTrendRange] = useState<keyof typeof ranges>("全部");
+  const [trendLogScale, setTrendLogScale] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -473,6 +484,12 @@ export default function Home() {
     const sessions = ranges[range];
     return Number.isFinite(sessions) ? market.series.slice(-sessions) : market.series;
   }, [market, range]);
+
+  const visibleTrendPoints = useMemo(() => {
+    if (!market) return [];
+    const sessions = ranges[trendRange];
+    return Number.isFinite(sessions) ? market.series.slice(-sessions) : market.series;
+  }, [market, trendRange]);
 
   const visibleContext = useMemo(() => {
     if (!context || !visiblePoints.length) return [];
@@ -541,17 +558,25 @@ export default function Home() {
               <div className="segmented" aria-label="时间范围">
                 {(Object.keys(ranges) as Array<keyof typeof ranges>).map((label) => <button key={label} aria-pressed={range === label} className={range === label ? "active" : ""} onClick={() => setRange(label)}>{label}</button>)}
               </div>
-              <button aria-pressed={logScale} className={`scale-button ${logScale ? "active" : ""}`} onClick={() => setLogScale((value) => !value)}>对数尺度</button>
+              <button aria-pressed={logScale} className={`scale-button ${logScale ? "active" : ""}`} onClick={() => setLogScale((value) => !value)}>{logScale ? "对数尺度" : "线性尺度"}</button>
             </div>
           </div>
-          <div className="legend"><span><i className="close-line" />收盘</span><span><i className="ema50-line" />EMA50</span><span><i className="ema200-line" />EMA200</span></div>
+          <div className="legend"><span><i className="close-line" />收盘</span><span><i className="ema50-line" />EMA50</span><span><i className="ema200-line" />EMA200</span><span><i className="robust-main-line" />稳健拟合</span><span><i className="robust-band" />经验区间</span></div>
           <PriceChart points={visiblePoints} logScale={logScale} />
           <div className="timeline-label"><span>防御</span><span>修复</span><span>多头</span></div>
           <RegimeTimeline points={visiblePoints} />
         </section>
 
         <section className="robust-trend-panel panel">
-          <div className="section-head"><div><span className="eyebrow">ROBUST GROWTH PATH</span><h2>全历史稳健增长趋势</h2></div><span className="source-chip">1990 至今 · 每日全量重算</span></div>
+          <div className="section-head">
+            <div><span className="eyebrow">ROBUST GROWTH PATH</span><h2>全历史稳健增长趋势</h2></div>
+            <div className="chart-controls">
+              <div className="segmented" aria-label="稳健趋势时间范围">
+                {(Object.keys(ranges) as Array<keyof typeof ranges>).map((label) => <button key={label} aria-pressed={trendRange === label} className={trendRange === label ? "active" : ""} onClick={() => setTrendRange(label)}>{label}</button>)}
+              </div>
+              <button aria-pressed={trendLogScale} className={`scale-button ${trendLogScale ? "active" : ""}`} onClick={() => setTrendLogScale((value) => !value)}>{trendLogScale ? "对数尺度" : "线性尺度"}</button>
+            </div>
+          </div>
           <div className="trend-summary">
             <p><span>当前拟合点位</span><strong>{number(robustTrend.fitted_close)}</strong><small>实际 {number(summary.close)}</small></p>
             <p><span>相对趋势偏离</span><strong className={tone(robustTrend.deviation_pct)}>{signed(robustTrend.deviation_pct)}</strong><small>正值高于长期路径</small></p>
@@ -559,8 +584,8 @@ export default function Home() {
             <p><span>经验中枢区间</span><strong>{number(robustTrend.lower_band)}–{number(robustTrend.upper_band)}</strong><small>历史残差 10%–90%</small></p>
           </div>
           <div className="legend robust-legend"><span><i className="close-line" />实际收盘</span><span><i className="robust-line" />稳健拟合</span><span><i className="robust-band" />经验区间</span></div>
-          <RobustTrendChart points={market.series} />
-          <p className="method-note">在全部历史收盘价的对数上使用 Huber 迭代加权回归，再指数还原为正常点位。异常偏离会被自动降权（本次 {number(robustTrend.downweighted_pct)}% 样本），以降低泡沫、崩跌等极端阶段对长期斜率的影响；该路径描述长期统计中枢，不是目标价。</p>
+          <RobustTrendChart points={visibleTrendPoints} logScale={trendLogScale} />
+          <p className="method-note">拟合始终使用 1990 年以来全部历史，时间按钮只改变显示窗口。在全部历史收盘价的对数上使用 Huber 迭代加权回归，再指数还原为正常点位。异常偏离会被自动降权（本次 {number(robustTrend.downweighted_pct)}% 样本），以降低泡沫、崩跌等极端阶段对长期斜率的影响；该路径描述长期统计中枢，不是目标价。</p>
         </section>
 
         <section className="risk-panel panel">

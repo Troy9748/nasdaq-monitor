@@ -77,12 +77,13 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--cyan); outline-
 .segmented button { padding: 6px 9px; }
 .scale-button { padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; }
 .segmented button.active, .scale-button.active { color: var(--cyan); background: rgba(34, 211, 238, .1); }
-.legend { display: flex; gap: 16px; margin: 18px 0 4px 58px; color: #8796a8; font: 10px ui-monospace, monospace; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 18px 0 4px 58px; color: #8796a8; font: 10px ui-monospace, monospace; }
 .legend span { display: flex; align-items: center; gap: 6px; }
 .legend i { display: inline-block; width: 17px; height: 2px; }
 .close-line { background: var(--cyan); }
 .ema50-line { background: var(--violet); }
 .ema200-line { background: var(--amber); }
+.robust-main-line { background: #f472b6; }
 .robust-line { background: var(--violet); }
 .robust-band { height: 7px !important; background: rgba(167, 139, 250, .22); }
 .chart-wrap { position: relative; height: 410px; }
