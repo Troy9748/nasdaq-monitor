@@ -627,6 +627,17 @@ def calculate_indicators(prices: pd.DataFrame, *, advanced: bool = False) -> pd.
     data["EMA50"] = close.ewm(span=50, adjust=False).mean()
     data["EMA200"] = close.ewm(span=200, adjust=False).mean()
     data["SMA200"] = close.rolling(200).mean()
+    bollinger_mid = close.rolling(20).mean()
+    bollinger_std = close.rolling(20).std(ddof=0)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    data["Bollinger_Mid"] = bollinger_mid
+    data["Bollinger_Upper"] = bollinger_mid + 2 * bollinger_std
+    data["Bollinger_Lower"] = bollinger_mid - 2 * bollinger_std
+    data["MACD"] = ema12 - ema26
+    data["MACD_Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
+    data["MACD_Histogram"] = data["MACD"] - data["MACD_Signal"]
+    data["ROC20_Pct"] = close.pct_change(20) * 100
     data["RSI14"] = 100 - (100 / (1 + relative_strength))
     data["Volatility20_Pct"] = daily_return.rolling(20).std() * math.sqrt(252) * 100
     data["High252"] = close.rolling(252).max()
@@ -873,8 +884,16 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
             "one_year": _round_optional(period_return(close, 252)),
             "since_1990_cagr": round(((float(close.iloc[-1]) / float(close.iloc[0])) ** (1 / years) - 1) * 100, 2),
         },
+        "ema20": round(float(latest["EMA20"]), 2),
         "ema50": round(float(latest["EMA50"]), 2),
         "ema200": round(float(latest["EMA200"]), 2),
+        "sma200": _round_optional(float(latest["SMA200"])),
+        "bollinger_upper": _round_optional(float(latest["Bollinger_Upper"])),
+        "bollinger_lower": _round_optional(float(latest["Bollinger_Lower"])),
+        "macd": _round_optional(float(latest["MACD"])),
+        "macd_signal": _round_optional(float(latest["MACD_Signal"])),
+        "macd_histogram": _round_optional(float(latest["MACD_Histogram"])),
+        "roc20_pct": _round_optional(float(latest["ROC20_Pct"])),
         "distance_ema200_pct": round(float(latest["Distance_EMA200_Pct"]), 2),
         "distance_high252_pct": _round_optional(float(latest["Distance_High252_Pct"])),
         "rsi14": _round_optional(float(latest["RSI14"])),
@@ -920,7 +939,7 @@ def deterministic_analysis(snapshot: dict) -> str:
     return "\n".join(
         [
             f"市场状态：{snapshot['status']}。{snapshot['status_detail']}，当前距 EMA200 {snapshot['distance_ema200_pct']:+.2f}%。",
-            f"动量观察：RSI14 为 {snapshot['rsi14']:.2f}，近 20 日年化波动率为 {snapshot['volatility20_pct']:.2f}%。",
+            f"动量观察：RSI14 为 {snapshot['rsi14']:.2f}，MACD 柱值 {snapshot['macd_histogram']:+.2f}，20 日涨跌幅 {snapshot['roc20_pct']:+.2f}%，近 20 日年化波动率 {snapshot['volatility20_pct']:.2f}%。",
             f"风险位置：指数距 52 周高点 {snapshot['distance_high252_pct']:+.2f}%，当前历史高点回撤 {snapshot['drawdown_pct']:.2f}%。",
             f"长期位置：全历史稳健趋势偏离 {trend['deviation_pct']:+.2f}%、处于历史第 {trend['deviation_percentile']:.2f} 百分位；无未来数据月度趋势偏离 {asof.get('deviation_pct', float('nan')):+.2f}%。",
             f"环境观察：VXN {vxn.get('value', '—')}，10年期美债 {treasury.get('value', '—')}%，成分股位于 EMA200 上方比例 {breadth.get('above_ema200_pct', '—')}%。",
@@ -945,7 +964,8 @@ def build_ai_request(snapshot: dict) -> tuple[str, dict, str, str]:
                     "JSON 格式示例：{\"market_state\":\"文字\",\"momentum_trend\":\"文字\",\"risks\":\"文字\","
                     "\"next_session_watch\":\"文字\",\"facts\":[{\"metric\":\"close\",\"value\":0}]}；"
                     "示例中的0必须替换为输入里的精确值，且 facts 必须扩展到3至6项。"
-                    "metric 只能选 close、daily_return_pct、ema50、ema200、rsi14、volatility20_pct、drawdown_pct、"
+                    "metric 只能选 close、daily_return_pct、ema20、ema50、ema200、sma200、macd、macd_signal、"
+                    "macd_histogram、roc20_pct、rsi14、volatility20_pct、drawdown_pct、"
                     "robust_log_trend.deviation_pct、robust_log_trend.deviation_percentile、"
                     "asof_robust_log_trend.deviation_pct、context.vxn.value、context.treasury10y.value、"
                     "context.breadth.above_ema200_pct；value 必须与输入完全一致。"
@@ -983,8 +1003,14 @@ def _snapshot_fact_values(snapshot: dict) -> dict[str, float]:
     paths = [
         "close",
         "daily_return_pct",
+        "ema20",
         "ema50",
         "ema200",
+        "sma200",
+        "macd",
+        "macd_signal",
+        "macd_histogram",
+        "roc20_pct",
         "rsi14",
         "volatility20_pct",
         "drawdown_pct",
@@ -1072,8 +1098,17 @@ def export_data(
 
     columns = [
         "Close",
+        "EMA20",
         "EMA50",
         "EMA200",
+        "SMA200",
+        "Bollinger_Mid",
+        "Bollinger_Upper",
+        "Bollinger_Lower",
+        "MACD",
+        "MACD_Signal",
+        "MACD_Histogram",
+        "ROC20_Pct",
         "RSI14",
         "Volatility20_Pct",
         "Drawdown_Pct",
@@ -1096,8 +1131,17 @@ def export_data(
             {
                 "date": date.date().isoformat(),
                 "close": _json_number(row["Close"]),
+                "ema20": _json_number(row["EMA20"]),
                 "ema50": _json_number(row["EMA50"]),
                 "ema200": _json_number(row["EMA200"]),
+                "sma200": _json_number(row["SMA200"]),
+                "bollinger_mid": _json_number(row["Bollinger_Mid"]),
+                "bollinger_upper": _json_number(row["Bollinger_Upper"]),
+                "bollinger_lower": _json_number(row["Bollinger_Lower"]),
+                "macd": _json_number(row["MACD"]),
+                "macd_signal": _json_number(row["MACD_Signal"]),
+                "macd_histogram": _json_number(row["MACD_Histogram"]),
+                "roc20_pct": _json_number(row["ROC20_Pct"]),
                 "rsi14": _json_number(row["RSI14"]),
                 "volatility20_pct": _json_number(row["Volatility20_Pct"]),
                 "drawdown_pct": _json_number(row["Drawdown_Pct"]),

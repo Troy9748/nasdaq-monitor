@@ -29,9 +29,23 @@ class MonitorTest(unittest.TestCase):
 
         self.assertEqual(len(data), 300)
         self.assertTrue(
-            {"EMA50", "EMA200", "RSI14", "Volatility20_Pct", "Drawdown_Pct", "Robust_Log_Trend"}.issubset(data.columns)
+            {
+                "EMA20", "EMA50", "EMA200", "SMA200", "Bollinger_Upper",
+                "Bollinger_Lower", "MACD", "MACD_Signal", "MACD_Histogram",
+                "ROC20_Pct", "RSI14", "Volatility20_Pct", "Drawdown_Pct",
+                "Robust_Log_Trend",
+            }.issubset(data.columns)
         )
         self.assertAlmostEqual(data.iloc[-1]["Drawdown_Pct"], 0)
+        self.assertAlmostEqual(
+            data.iloc[-1]["MACD"] - data.iloc[-1]["MACD_Signal"],
+            data.iloc[-1]["MACD_Histogram"],
+        )
+        self.assertAlmostEqual(
+            data.iloc[-1]["ROC20_Pct"],
+            (1299 / 1279 - 1) * 100,
+            places=4,
+        )
         self.assertIn("annualized_growth_pct", data.attrs["robust_log_trend"])
 
     def test_robust_log_trend_limits_extreme_price_shock(self):

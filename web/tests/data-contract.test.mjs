@@ -22,6 +22,9 @@ test("generated data satisfies the dashboard contract", async () => {
   assert.ok(market.summary.trend_model_stability.history.length > 20);
   assert.ok(market.series.every((point) => point.robust_trend > 0 && point.robust_lower > 0 && point.robust_upper > 0 && point.robust_percentile > 0));
   assert.ok(market.series.slice(-252).every((point) => point.asof_robust_trend > 0 && point.asof_robust_percentile > 0));
+  assert.ok(market.series.slice(-252).every((point) => point.ema20 > 0 && point.sma200 > 0));
+  assert.ok(market.series.slice(-252).every((point) => point.bollinger_lower > 0 && point.bollinger_upper > point.bollinger_lower));
+  assert.ok(market.series.slice(-252).every((point) => Number.isFinite(point.macd) && Number.isFinite(point.macd_signal) && Number.isFinite(point.roc20_pct)));
   assert.match(market.summary.provenance.data_fingerprint_sha256, /^[a-f0-9]{64}$/);
   assert.equal(context.series.at(-1).date, market.latest_date);
   assert.equal(analysis.market_date, market.latest_date);

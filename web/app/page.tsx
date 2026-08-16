@@ -5,8 +5,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 type Point = {
   date: string;
   close: number;
+  ema20: number | null;
   ema50: number | null;
   ema200: number | null;
+  sma200: number | null;
+  bollinger_mid: number | null;
+  bollinger_upper: number | null;
+  bollinger_lower: number | null;
+  macd: number | null;
+  macd_signal: number | null;
+  macd_histogram: number | null;
+  roc20_pct: number | null;
   rsi14: number | null;
   volatility20_pct: number | null;
   drawdown_pct: number | null;
@@ -157,8 +166,42 @@ function tone(value: number | null | undefined) {
   return value > 0 ? "positive" : "negative";
 }
 
-type PriceVisibility = { close: boolean; ema50: boolean; ema200: boolean; robust: boolean; band: boolean };
+type PriceVisibility = { close: boolean; ema20: boolean; ema50: boolean; ema200: boolean; sma200: boolean; bollinger: boolean; robust: boolean; band: boolean };
 type TrendVisibility = { close: boolean; robust: boolean; asof: boolean; band: boolean };
+type RiskIndicator = "rsi" | "macd" | "roc20" | "volatility" | "drawdown" | "trendDeviation";
+type RiskVisibility = Record<RiskIndicator, boolean>;
+
+const basicPriceVisibility: PriceVisibility = { close: true, ema20: false, ema50: true, ema200: true, sma200: false, bollinger: false, robust: false, band: false };
+const pricePresets: Record<string, PriceVisibility> = {
+  基础: basicPriceVisibility,
+  短线: { close: true, ema20: true, ema50: true, ema200: false, sma200: false, bollinger: true, robust: false, band: false },
+  长期: { close: true, ema20: false, ema50: false, ema200: true, sma200: false, bollinger: false, robust: true, band: true },
+  清空: { close: false, ema20: false, ema50: false, ema200: false, sma200: false, bollinger: false, robust: false, band: false },
+};
+const basicRiskVisibility: RiskVisibility = { rsi: true, macd: true, roc20: false, volatility: false, drawdown: true, trendDeviation: false };
+const indicatorGuide = [
+  ["EMA20 / EMA50 / EMA200", "指数加权均线", "分别观察约一个月、中期和长期趋势；近期价格权重更高。均线滞后，不能单独预测拐点。"],
+  ["SMA200", "长期简单均线", "每个交易日等权，适合与常见长期市场口径对照；与 EMA200 同开通常信息重复。"],
+  ["布林带 20, 2", "波动包络", "20日均线加减两倍标准差；带宽扩张表示近期波动放大，触及上下轨不等于反转。"],
+  ["RSI14", "动量强弱", "0–100 区间；70以上偏热、30以下偏冷。强趋势中可长时间停留在极端区域。"],
+  ["MACD 12, 26, 9", "趋势动量", "EMA12 与 EMA26 的差及其9日信号线；交叉反映动量变化，但震荡市容易反复。"],
+  ["20日涨跌幅", "短期动量", "当前收盘相对20个交易日前的变化；零轴用于区分正负动量，不代表未来收益。"],
+  ["20日年化波动", "已实现风险", "最近20日收益标准差年化；衡量波动强度，不判断上涨或下跌方向。"],
+  ["历史回撤", "资本损伤", "当前点位相对此前历史高点的跌幅；比单日涨跌更适合观察风险恢复过程。"],
+  ["稳健趋势偏离", "长期位置", "实际价格相对 Huber 对数趋势的百分比；描述历史位置，不是估值或目标价。"],
+] as const;
+
+function savedVisibility<T extends Record<string, boolean>>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  const raw = new URLSearchParams(window.location.search).get(key);
+  if (raw == null) return fallback;
+  const selected = new Set(raw === "none" ? [] : raw.split(","));
+  return Object.fromEntries(Object.keys(fallback).map((name) => [name, selected.has(name)])) as T;
+}
+
+function visibilityQuery(value: Record<string, boolean>) {
+  return Object.entries(value).filter(([, visible]) => visible).map(([name]) => name).join(",") || "none";
+}
 
 function downloadCanvas(canvas: HTMLCanvasElement | null, filename: string) {
   if (!canvas) return;
@@ -166,6 +209,19 @@ function downloadCanvas(canvas: HTMLCanvasElement | null, filename: string) {
   link.download = filename;
   link.href = canvas.toDataURL("image/png");
   link.click();
+}
+
+function priceDetails(point: Point, visibility: PriceVisibility) {
+  const values = [
+    visibility.ema20 && `EMA20 ${number(point.ema20)}`,
+    visibility.ema50 && `EMA50 ${number(point.ema50)}`,
+    visibility.ema200 && `EMA200 ${number(point.ema200)}`,
+    visibility.sma200 && `SMA200 ${number(point.sma200)}`,
+    visibility.bollinger && `布林带 ${number(point.bollinger_lower)}–${number(point.bollinger_upper)}`,
+    visibility.robust && `稳健趋势 ${number(point.robust_trend)}`,
+    visibility.band && `经验区间 ${number(point.robust_lower)}–${number(point.robust_upper)}`,
+  ].filter(Boolean);
+  return values.length ? values.join(" · ") : "未选择价格曲线";
 }
 
 function PriceChart({ points, logScale, visibility }: { points: Point[]; logScale: boolean; visibility: PriceVisibility }) {
@@ -190,8 +246,12 @@ function PriceChart({ points, logScale, visibility }: { points: Point[]; logScal
       const height = bounds.height - padding.top - padding.bottom;
       const values = points.flatMap((point) => [
         visibility.close ? point.close : null,
+        visibility.ema20 ? point.ema20 : null,
         visibility.ema50 ? point.ema50 : null,
         visibility.ema200 ? point.ema200 : null,
+        visibility.sma200 ? point.sma200 : null,
+        visibility.bollinger ? point.bollinger_lower : null,
+        visibility.bollinger ? point.bollinger_upper : null,
         visibility.band ? point.robust_lower : null,
         visibility.band ? point.robust_upper : null,
         visibility.robust ? point.robust_trend : null,
@@ -259,10 +319,30 @@ function PriceChart({ points, logScale, visibility }: { points: Point[]; logScal
         context.fill();
       }
 
-      const line = (key: "close" | "ema50" | "ema200" | "robust_trend", color: string, widthPx: number) => {
+      if (visibility.bollinger) {
+        context.fillStyle = "rgba(34, 211, 238, 0.07)";
+        context.beginPath();
+        let started = false;
+        points.forEach((point, index) => {
+          if (point.bollinger_upper == null) return;
+          if (started) context.lineTo(x(index), y(point.bollinger_upper));
+          else context.moveTo(x(index), y(point.bollinger_upper));
+          started = true;
+        });
+        for (let index = points.length - 1; index >= 0; index -= 1) {
+          const value = points[index].bollinger_lower;
+          if (value != null) context.lineTo(x(index), y(value));
+        }
+        context.closePath();
+        context.fill();
+      }
+
+      const line = (key: "close" | "ema20" | "ema50" | "ema200" | "sma200" | "bollinger_mid" | "bollinger_upper" | "bollinger_lower" | "robust_trend", color: string, widthPx: number, dashed = false) => {
+        context.save();
         context.strokeStyle = color;
         context.lineWidth = widthPx;
         context.lineJoin = "round";
+        if (dashed) context.setLineDash([5, 4]);
         context.beginPath();
         let started = false;
         points.forEach((point, index) => {
@@ -276,10 +356,18 @@ function PriceChart({ points, logScale, visibility }: { points: Point[]; logScal
           }
         });
         context.stroke();
+        context.restore();
       };
 
+      if (visibility.bollinger) {
+        line("bollinger_upper", "rgba(34, 211, 238, 0.48)", 1, true);
+        line("bollinger_lower", "rgba(34, 211, 238, 0.48)", 1, true);
+        line("bollinger_mid", "rgba(34, 211, 238, 0.34)", 1);
+      }
+      if (visibility.sma200) line("sma200", "rgba(248, 113, 113, 0.9)", 1.3, true);
       if (visibility.ema200) line("ema200", "rgba(245, 158, 11, 0.92)", 1.4);
       if (visibility.ema50) line("ema50", "rgba(167, 139, 250, 0.82)", 1.2);
+      if (visibility.ema20) line("ema20", "rgba(52, 211, 153, 0.85)", 1.15);
       if (visibility.robust) line("robust_trend", "rgba(244, 114, 182, 0.95)", 1.8);
       if (visibility.close) line("close", "#22d3ee", 2);
     };
@@ -308,7 +396,7 @@ function PriceChart({ points, logScale, visibility }: { points: Point[]; logScal
         <div className="chart-tooltip" role="status">
           <span>{hovered.point.date}</span>
           <strong>{number(hovered.point.close)}</strong>
-          <small>EMA200 {number(hovered.point.ema200)} · 稳健趋势 {number(hovered.point.robust_trend)} · 第 {number(hovered.point.robust_percentile)} 百分位</small>
+          <small>{priceDetails(hovered.point, visibility)}</small>
         </div>
       )}
     </div>
@@ -463,7 +551,7 @@ function IndicatorChart({
   reference,
 }: {
   points: Point[];
-  field: "drawdown_pct" | "rsi14" | "volatility20_pct";
+  field: "drawdown_pct" | "rsi14" | "volatility20_pct" | "roc20_pct" | "robust_deviation_pct";
   color: string;
   reference?: number;
 }) {
@@ -515,6 +603,62 @@ function IndicatorChart({
     return () => observer.disconnect();
   }, [points, field, color, reference]);
   return <canvas className="indicator-canvas" ref={canvasRef} aria-label={`${field}历史走势图`} />;
+}
+
+function MacdChart({ points }: { points: Point[] }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const draw = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(bounds.width * ratio));
+      canvas.height = Math.max(1, Math.floor(bounds.height * ratio));
+      const context = canvas.getContext("2d");
+      const values = points.flatMap((point) => [point.macd, point.macd_signal, point.macd_histogram]).filter((value): value is number => value != null);
+      if (!context || values.length < 2) return;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+      const limit = Math.max(...values.map(Math.abs), 1);
+      const x = (index: number) => (index / Math.max(1, points.length - 1)) * bounds.width;
+      const y = (value: number) => 8 + (bounds.height - 16) * (0.5 - value / (2 * limit));
+      context.strokeStyle = "rgba(148,163,184,.28)";
+      context.setLineDash([4, 4]);
+      context.beginPath();
+      context.moveTo(0, y(0));
+      context.lineTo(bounds.width, y(0));
+      context.stroke();
+      context.setLineDash([]);
+      const barWidth = Math.max(0.7, bounds.width / Math.max(points.length, 1));
+      points.forEach((point, index) => {
+        if (point.macd_histogram == null) return;
+        context.fillStyle = point.macd_histogram >= 0 ? "rgba(52,211,153,.38)" : "rgba(251,113,133,.38)";
+        context.fillRect(x(index), Math.min(y(0), y(point.macd_histogram)), barWidth, Math.max(1, Math.abs(y(point.macd_histogram) - y(0))));
+      });
+      const line = (field: "macd" | "macd_signal", color: string) => {
+        context.strokeStyle = color;
+        context.lineWidth = 1.5;
+        context.beginPath();
+        let started = false;
+        points.forEach((point, index) => {
+          const value = point[field];
+          if (value == null) return;
+          if (started) context.lineTo(x(index), y(value));
+          else context.moveTo(x(index), y(value));
+          started = true;
+        });
+        context.stroke();
+      };
+      line("macd", "#22d3ee");
+      line("macd_signal", "#f59e0b");
+    };
+    draw();
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [points]);
+  return <canvas className="indicator-canvas" ref={canvasRef} aria-label="MACD线、信号线与柱状图历史走势" />;
 }
 
 function ContextIndicatorChart({
@@ -601,8 +745,9 @@ export default function Home() {
   const [logScale, setLogScale] = useState(() => savedScale("priceScale"));
   const [trendRange, setTrendRange] = useState<keyof typeof ranges>(() => savedRange("trendRange", "全部"));
   const [trendLogScale, setTrendLogScale] = useState(() => savedScale("trendScale"));
-  const [priceVisibility, setPriceVisibility] = useState<PriceVisibility>({ close: true, ema50: true, ema200: true, robust: true, band: true });
-  const [trendVisibility, setTrendVisibility] = useState<TrendVisibility>({ close: true, robust: true, asof: true, band: true });
+  const [priceVisibility, setPriceVisibility] = useState<PriceVisibility>(() => savedVisibility("priceLines", basicPriceVisibility));
+  const [trendVisibility, setTrendVisibility] = useState<TrendVisibility>(() => savedVisibility("trendLines", { close: true, robust: true, asof: true, band: false }));
+  const [riskVisibility, setRiskVisibility] = useState<RiskVisibility>(() => savedVisibility("riskIndicators", basicRiskVisibility));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -611,8 +756,11 @@ export default function Home() {
     query.set("priceScale", logScale ? "log" : "linear");
     query.set("trendRange", trendRange);
     query.set("trendScale", trendLogScale ? "log" : "linear");
+    query.set("priceLines", visibilityQuery(priceVisibility));
+    query.set("trendLines", visibilityQuery(trendVisibility));
+    query.set("riskIndicators", visibilityQuery(riskVisibility));
     window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
-  }, [range, logScale, trendRange, trendLogScale]);
+  }, [range, logScale, trendRange, trendLogScale, priceVisibility, trendVisibility, riskVisibility]);
 
   useEffect(() => {
     Promise.all([
@@ -673,6 +821,7 @@ export default function Home() {
     ["1年", summary.returns.one_year],
     ["1990至今年化", summary.returns.since_1990_cagr],
   ] as const;
+  const latestPoint = market.series.at(-1)!;
 
   return (
     <main>
@@ -720,10 +869,18 @@ export default function Home() {
               <button aria-pressed={logScale} className={`scale-button ${logScale ? "active" : ""}`} onClick={() => setLogScale((value) => !value)}>{logScale ? "对数尺度" : "线性尺度"}</button>
             </div>
           </div>
+          <div className="preset-row" aria-label="价格指标预设">
+            <span>显示预设</span>
+            {Object.entries(pricePresets).map(([label, preset]) => <button key={label} onClick={() => setPriceVisibility(preset)}>{label}</button>)}
+            <small>默认“基础”只显示收盘、EMA50、EMA200；下方每项仍可单独开关。</small>
+          </div>
           <div className="legend interactive-legend">
             <button aria-pressed={priceVisibility.close} onClick={() => setPriceVisibility((value) => ({ ...value, close: !value.close }))}><i className="close-line" />收盘</button>
+            <button aria-pressed={priceVisibility.ema20} onClick={() => setPriceVisibility((value) => ({ ...value, ema20: !value.ema20 }))}><i className="ema20-line" />EMA20</button>
             <button aria-pressed={priceVisibility.ema50} onClick={() => setPriceVisibility((value) => ({ ...value, ema50: !value.ema50 }))}><i className="ema50-line" />EMA50</button>
             <button aria-pressed={priceVisibility.ema200} onClick={() => setPriceVisibility((value) => ({ ...value, ema200: !value.ema200 }))}><i className="ema200-line" />EMA200</button>
+            <button aria-pressed={priceVisibility.sma200} onClick={() => setPriceVisibility((value) => ({ ...value, sma200: !value.sma200 }))}><i className="sma200-line" />SMA200</button>
+            <button aria-pressed={priceVisibility.bollinger} onClick={() => setPriceVisibility((value) => ({ ...value, bollinger: !value.bollinger }))}><i className="bollinger-band" />布林带20,2</button>
             <button aria-pressed={priceVisibility.robust} onClick={() => setPriceVisibility((value) => ({ ...value, robust: !value.robust }))}><i className="robust-main-line" />稳健拟合</button>
             <button aria-pressed={priceVisibility.band} onClick={() => setPriceVisibility((value) => ({ ...value, band: !value.band }))}><i className="robust-band" />经验区间</button>
           </div>
@@ -767,11 +924,25 @@ export default function Home() {
         </section>
 
         <section className="risk-panel panel">
-          <div className="section-head"><div><span className="eyebrow">RISK DIAGNOSTICS</span><h2>回撤、动量与波动结构</h2></div></div>
+          <div className="section-head"><div><span className="eyebrow">TECHNICAL INDICATORS</span><h2>动量、波动与风险指标</h2></div><button className="reset-indicators" onClick={() => setRiskVisibility(basicRiskVisibility)}>恢复基础版</button></div>
+          <div className="indicator-picker" aria-label="选择副图指标">
+            {([
+              ["rsi", "RSI14"], ["macd", "MACD"], ["roc20", "20日涨跌幅"],
+              ["volatility", "20日年化波动"], ["drawdown", "历史回撤"], ["trendDeviation", "稳健趋势偏离"],
+            ] as Array<[RiskIndicator, string]>).map(([key, label]) => <button key={key} aria-pressed={riskVisibility[key]} onClick={() => setRiskVisibility((value) => ({ ...value, [key]: !value[key] }))}>{label}</button>)}
+          </div>
           <div className="risk-grid">
-            <article><div><span>历史回撤</span><strong className="negative">{signed(summary.drawdown_pct)}</strong></div><IndicatorChart points={visiblePoints} field="drawdown_pct" color="#fb7185" reference={0} /></article>
-            <article><div><span>RSI 14</span><strong>{number(summary.rsi14)}</strong></div><IndicatorChart points={visiblePoints} field="rsi14" color="#a78bfa" reference={50} /></article>
-            <article><div><span>20日年化波动</span><strong>{number(summary.volatility20_pct)}%</strong></div><IndicatorChart points={visiblePoints} field="volatility20_pct" color="#f59e0b" /></article>
+            {riskVisibility.rsi && <article><div><span>RSI 14</span><strong>{number(summary.rsi14)}</strong></div><IndicatorChart points={visiblePoints} field="rsi14" color="#a78bfa" reference={50} /><small className="chart-caption">50 为强弱中轴；70/30 常作偏热/偏冷参考。</small></article>}
+            {riskVisibility.macd && <article><div><span>MACD 12,26,9</span><strong className={tone(latestPoint.macd_histogram)}>{signed(latestPoint.macd_histogram, "")}</strong></div><MacdChart points={visiblePoints} /><small className="chart-caption">青色 MACD · 橙色信号线 · 柱体为两者差值。</small></article>}
+            {riskVisibility.roc20 && <article><div><span>20日涨跌幅</span><strong className={tone(latestPoint.roc20_pct)}>{signed(latestPoint.roc20_pct)}</strong></div><IndicatorChart points={visiblePoints} field="roc20_pct" color="#22d3ee" reference={0} /><small className="chart-caption">零轴上方为正动量，下方为负动量。</small></article>}
+            {riskVisibility.volatility && <article><div><span>20日年化波动</span><strong>{number(summary.volatility20_pct)}%</strong></div><IndicatorChart points={visiblePoints} field="volatility20_pct" color="#f59e0b" /><small className="chart-caption">只衡量波动强度，不区分涨跌方向。</small></article>}
+            {riskVisibility.drawdown && <article><div><span>历史回撤</span><strong className="negative">{signed(summary.drawdown_pct)}</strong></div><IndicatorChart points={visiblePoints} field="drawdown_pct" color="#fb7185" reference={0} /><small className="chart-caption">相对此前历史高点的跌幅，越负代表损伤越深。</small></article>}
+            {riskVisibility.trendDeviation && <article><div><span>稳健趋势偏离</span><strong className={tone(latestPoint.robust_deviation_pct)}>{signed(latestPoint.robust_deviation_pct)}</strong></div><IndicatorChart points={visiblePoints} field="robust_deviation_pct" color="#f472b6" reference={0} /><small className="chart-caption">零轴代表全历史稳健增长中枢，不是估值目标。</small></article>}
+            {!Object.values(riskVisibility).some(Boolean) && <p className="empty-indicators">当前未选择副图指标，可在上方开启任意项目。</p>}
+          </div>
+          <div className="indicator-guide">
+            <div><span className="eyebrow">INDICATOR GUIDE</span><h3>指标意义与使用边界</h3><p>优先组合不同维度，不建议同时开启所有相似指标。</p></div>
+            <div className="indicator-guide-grid">{indicatorGuide.map(([name, category, description]) => <article key={name}><span>{category}</span><strong>{name}</strong><p>{description}</p></article>)}</div>
           </div>
         </section>
 
