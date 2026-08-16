@@ -5,19 +5,19 @@
   },
   "ai": {
     "status": "回退",
-    "source": "规则分析",
-    "model": null
+    "source": "规则分析（AI 回退）",
+    "model": "deepseek-v4-flash"
   },
   "calibration": {
-    "checked_at": "2026-08-09T22:28:09.918090+00:00",
+    "checked_at": "2026-08-16T22:17:59.781913+00:00",
     "corrected_rows": 5,
     "pending_rows": 0,
     "max_abs_diff_pct": 0.0,
-    "max_diff_date": "2026-08-07"
+    "max_diff_date": "2026-08-10"
   },
   "email": {
     "status": "已发送",
     "market_date": "2026-08-14"
   },
-  "checked_at": "2026-08-16T08:28:41.902316+00:00"
+  "checked_at": "2026-08-16T22:18:36.143873+00:00"
 }
