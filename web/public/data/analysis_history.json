@@ -194,11 +194,54 @@
   },
   {
     "market_date": "2026-08-14",
-    "generated_at": "2026-08-16T22:18:32.547065+00:00",
-    "source": "规则分析（AI 回退）",
-    "model": "deepseek-v4-flash",
+    "generated_at": "2026-08-17T10:38:44.174854+00:00",
+    "source": "规则分析",
+    "model": null,
     "text": "市场状态：多头趋势。收盘价与 EMA50 均位于 EMA200 上方，当前距 EMA200 +11.38%。\n动量观察：RSI14 为 59.63，MACD 柱值 +179.44，20 日涨跌幅 +5.08%，近 20 日年化波动率 23.88%。\n风险位置：指数距 52 周高点 -2.00%，当前历史高点回撤 -2.00%。\n长期位置：全历史稳健趋势偏离 +58.83%、处于历史第 88.56 百分位；无未来数据月度趋势偏离 +59.11%。\n环境观察：VXN 20.72，10年期美债 4.7%，成分股位于 EMA200 上方比例 73.0%。\n条件框架：若价格维持 EMA200 上方且市场广度改善，趋势确认度提高；若跌破 EMA200 并伴随 VXN 上升，则应优先控制风险。仅作数据观察，不构成投资建议。",
     "fact_validation": "deterministic",
-    "disclaimer": "仅供数据研究与市场观察，不构成投资建议。"
+    "disclaimer": "仅供数据研究与市场观察，不构成投资建议。",
+    "evidence": [
+      {
+        "metric": "close_vs_ema200_pct",
+        "value": 11.38,
+        "supports": "趋势"
+      },
+      {
+        "metric": "breadth_above_ema200_pct",
+        "value": 73.0,
+        "supports": "宽度"
+      },
+      {
+        "metric": "volatility20_pct",
+        "value": 23.88,
+        "supports": "风险"
+      },
+      {
+        "metric": "robust_deviation_pct",
+        "value": 58.83,
+        "supports": "长期位置"
+      }
+    ],
+    "contradictions": [
+      "当前主要指标未出现显著方向冲突，仍需观察下一交易日确认"
+    ],
+    "invalidation_conditions": [
+      "收盘跌破 EMA200 且市场宽度同步恶化",
+      "VXN 与已实现波动同时显著上升",
+      "临时行情经 FRED 校准后改变关键阈值判断"
+    ],
+    "data_quality": {
+      "score": 100.0,
+      "grade": "A",
+      "components": {
+        "行情新鲜度": 20,
+        "权威来源": 20.0,
+        "关键字段完整性": 20.0,
+        "环境数据覆盖": 20.0,
+        "跨源一致性": 20.0
+      },
+      "warnings": [],
+      "methodology_version": "2026-08-17.1"
+    }
   }
 ]

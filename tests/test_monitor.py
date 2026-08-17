@@ -12,6 +12,9 @@ from monitor import (
     build_calibration_audit,
     build_regime_analysis,
     calculate_asof_robust_log_trend,
+    calculate_risk_dashboard,
+    calculate_stress_scenarios,
+    calculate_walk_forward_validation,
     calculate_indicators,
     calculate_robust_log_trend,
     classify_signal,
@@ -23,6 +26,31 @@ from monitor import (
 
 
 class MonitorTest(unittest.TestCase):
+    def test_professional_risk_and_walk_forward_outputs(self):
+        index = pd.bdate_range("1999-01-01", periods=1800)
+        close = pd.Series(1000 * (1.0004 ** pd.RangeIndex(len(index))), index=index)
+        close.iloc[900:980] *= 0.7
+        data = calculate_indicators(pd.DataFrame({"Close": close}, index=index))
+
+        risk = calculate_risk_dashboard(data)
+        validation = calculate_walk_forward_validation(data)
+
+        self.assertGreaterEqual(risk["historical_var95_1d_pct"], 0)
+        self.assertGreaterEqual(risk["expected_shortfall95_1d_pct"], risk["historical_var95_1d_pct"])
+        self.assertFalse(validation["uses_future_data"])
+        self.assertEqual(validation["transaction_cost_bps"], 10)
+        self.assertIn("max_drawdown_pct", validation["strategy"])
+
+    def test_stress_scenarios_are_point_in_time(self):
+        index = pd.bdate_range("1999-01-01", "2023-12-31")
+        close = pd.Series(1000.0, index=index)
+        close.loc["2000-03-10":"2002-10-09"] = range(1000, 1000 - len(close.loc["2000-03-10":"2002-10-09"]), -1)
+        close.loc["2002-10-10":] = 1100
+
+        scenarios = calculate_stress_scenarios(close)
+
+        self.assertEqual(scenarios[0]["name"], "科技泡沫")
+        self.assertLess(scenarios[0]["peak_to_trough_pct"], 0)
     def test_indicators_cover_risk_and_trend(self):
         index = pd.bdate_range("2024-01-01", periods=300)
         data = calculate_indicators(pd.DataFrame({"Close": range(1000, 1300)}, index=index))

@@ -28,6 +28,7 @@ FRED_CONTEXT_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VXNCLS,DG
 NASDAQ_COMPONENTS_URL = "https://api.nasdaq.com/api/quote/list-type/nasdaq100"
 CSV_PATH = Path("nasdaq100_daily_data.csv")
 CONTEXT_CSV_PATH = Path("market_context_daily.csv")
+BENCHMARK_CSV_PATH = Path("market_benchmarks_daily.csv")
 WEB_DATA_DIR = Path("web/public/data")
 WEB_JSON_PATH = WEB_DATA_DIR / "nasdaq100.json"
 WEB_ANALYSIS_PATH = WEB_DATA_DIR / "analysis.json"
@@ -38,12 +39,25 @@ EMAIL_STATE_PATH = WEB_DATA_DIR / "email_state.json"
 WEB_CSV_PATH = WEB_DATA_DIR / CSV_PATH.name
 NEW_YORK = ZoneInfo("America/New_York")
 TREND_MODEL_VERSION = "2026-08-14.2"
+METHODOLOGY_VERSION = "2026-08-17.1"
+BENCHMARK_TICKERS = {
+    "^GSPC": "SP500",
+    "^NDXE": "NDXEqualWeight",
+    "^RUT": "Russell2000",
+    "QQQ": "QQQ",
+    "^IRX": "Treasury3M",
+}
+CONTEXT_COLUMNS = [
+    "VXN", "Treasury10Y", "BreadthEMA200Pct", "BreadthEMA20Pct", "BreadthEMA50Pct",
+    "BreadthSampleSize", "NewHigh20Count", "NewLow20Count",
+]
+BENCHMARK_COLUMNS = list(BENCHMARK_TICKERS.values())
 
 
 def fetch_bytes(url: str, timeout: int = 45) -> bytes:
     try:
         return subprocess.run(
-            ["curl", "-sS", "--fail", "--max-time", str(timeout), url],
+            ["curl", "--http1.1", "-sS", "--fail", "--max-time", str(timeout), "-H", "User-Agent: Mozilla/5.0", url],
             check=True,
             capture_output=True,
             timeout=timeout + 5,
@@ -193,9 +207,15 @@ def download_fred_context() -> pd.DataFrame:
 
 
 def load_context_history() -> pd.DataFrame:
-    if not CONTEXT_CSV_PATH.exists():
-        return pd.DataFrame(columns=["VXN", "Treasury10Y"])
-    return pd.read_csv(CONTEXT_CSV_PATH, parse_dates=["Date"]).set_index("Date")
+    history = (
+        pd.read_csv(CONTEXT_CSV_PATH, parse_dates=["Date"]).set_index("Date")
+        if CONTEXT_CSV_PATH.exists()
+        else pd.DataFrame(columns=["VXN", "Treasury10Y"])
+    )
+    if BENCHMARK_CSV_PATH.exists():
+        benchmark = pd.read_csv(BENCHMARK_CSV_PATH, parse_dates=["Date"]).set_index("Date")
+        history = history.combine_first(benchmark)
+    return history
 
 
 def download_recent_context() -> dict:
@@ -251,7 +271,7 @@ def newest_context_value(current: dict | None, cached: dict | None) -> dict | No
     return cached if cached.get("as_of", "") > current.get("as_of", "") else current
 
 
-def download_components() -> list[str]:
+def download_component_rows() -> list[dict]:
     request = urllib.request.Request(
         NASDAQ_COMPONENTS_URL,
         headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json, text/plain, */*"},
@@ -259,10 +279,109 @@ def download_components() -> list[str]:
     with urllib.request.urlopen(request, timeout=30) as response:
         result = json.load(response)
     rows = result["data"]["data"]["rows"]
-    symbols = sorted({row["symbol"].replace("/", "-") for row in rows if row.get("symbol")})
+    symbols = {row["symbol"].replace("/", "-") for row in rows if row.get("symbol")}
     if len(symbols) < 90:
         raise RuntimeError(f"Nasdaq 官方成分名单仅返回 {len(symbols)} 个代码")
-    return symbols
+    return rows
+
+
+def download_components() -> list[str]:
+    return sorted(
+        {row["symbol"].replace("/", "-") for row in download_component_rows() if row.get("symbol")}
+    )
+
+
+def calculate_top10_proxy(rows: list[dict]) -> dict:
+    parsed = []
+    for row in rows:
+        try:
+            market_cap = float(str(row.get("marketCap", "")).replace(",", ""))
+            change = float(str(row.get("percentageChange", "")).replace("%", "").replace("+", ""))
+        except ValueError:
+            continue
+        if market_cap > 0:
+            parsed.append((row["symbol"], market_cap, change))
+    if len(parsed) < 90:
+        raise RuntimeError("Nasdaq 成分接口缺少足够的市值或涨跌幅字段")
+    total_cap = sum(item[1] for item in parsed)
+    top10 = sorted(parsed, key=lambda item: item[1], reverse=True)[:10]
+    return {
+        "top10_market_cap_share_pct": round(sum(item[1] for item in top10) / total_cap * 100, 2),
+        "top10_daily_contribution_proxy_pct": round(sum(item[1] / total_cap * item[2] for item in top10), 3),
+        "members": [item[0] for item in top10],
+        "method": "当前成分股市值占比 × 当日涨跌幅代理；非 Nasdaq 官方修正权重贡献",
+    }
+
+
+def download_benchmark_history(*, full: bool = False) -> pd.DataFrame:
+    try:
+        data = yf.download(
+            list(BENCHMARK_TICKERS),
+            period="max" if full else "1mo",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            group_by="column",
+            threads=True,
+            timeout=45,
+        )
+        if data.empty or "Close" not in data:
+            raise RuntimeError("Yahoo 基准行情下载为空")
+        close = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data[["Close"]]
+        if not isinstance(close, pd.DataFrame):
+            close = close.to_frame()
+        result = pd.DataFrame(index=pd.to_datetime(close.index).tz_localize(None).normalize())
+        for ticker, column in BENCHMARK_TICKERS.items():
+            source = close[ticker] if ticker in close else pd.Series(dtype=float)
+            if not source.empty:
+                result[column] = source.to_numpy(dtype=float)
+        result.index.name = "Date"
+        return result.dropna(how="all").sort_index()
+    except Exception as error:
+        print(f"⚠️ Yahoo 基准限流，切换 Nasdaq/FRED 备用源: {error}")
+        return download_benchmark_fallback(full=full)
+
+
+def download_benchmark_fallback(*, full: bool = False) -> pd.DataFrame:
+    end = datetime.now(NEW_YORK).date()
+    start = (pd.Timestamp(end) - pd.DateOffset(years=10 if full else 1)).date()
+    frames = []
+    for symbol, asset_class, column in (
+        ("SPY", "etf", "SP500"),
+        ("NDXE", "index", "NDXEqualWeight"),
+        ("IWM", "etf", "Russell2000"),
+        ("QQQ", "etf", "QQQ"),
+    ):
+        url = (
+            f"https://api.nasdaq.com/api/quote/{symbol}/historical?assetclass={asset_class}"
+            f"&fromdate={start.isoformat()}&todate={end.isoformat()}&limit=5000"
+        )
+        payload = json.loads(fetch_bytes(url))
+        rows = (((payload.get("data") or {}).get("tradesTable") or {}).get("rows") or [])
+        if not rows:
+            continue
+        frame = pd.DataFrame(
+            {
+                "Date": pd.to_datetime([row["date"] for row in rows]),
+                column: [float(str(row["close"]).replace(",", "").replace("$", "")) for row in rows],
+            }
+        ).set_index("Date")
+        frames.append(frame)
+    try:
+        treasury = pd.read_csv(
+            io.BytesIO(fetch_bytes("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DTB3", timeout=15)),
+            parse_dates=["observation_date"],
+            na_values=".",
+        ).rename(columns={"observation_date": "Date", "DTB3": "Treasury3M"}).set_index("Date")
+        frames.append(treasury)
+    except Exception as error:
+        print(f"⚠️ FRED 3个月国库券备用序列不可用: {error}")
+    if len(frames) < 4:
+        raise RuntimeError("Nasdaq/FRED 备用基准返回不完整")
+    result = pd.concat(frames, axis=1).sort_index()
+    result.index.name = "Date"
+    result.attrs["benchmark_source"] = "Nasdaq NDXE + SPY/IWM/QQQ ETF proxies; FRED DTB3"
+    return result
 
 
 def calculate_breadth(symbols: list[str]) -> dict:
@@ -348,9 +467,29 @@ def build_market_context(*, refresh_fred: bool = False) -> tuple[pd.DataFrame, d
         print(f"⚠️ Yahoo 市场环境数据不可用，使用缓存: {error}")
     if not breadth_updated or not (context.get("breadth") or {}).get("above_ema50_pct"):
         try:
-            context["breadth"] = calculate_breadth(download_components())
+            rows = download_component_rows()
+            try:
+                context["breadth"] = calculate_breadth(
+                    sorted({row["symbol"].replace("/", "-") for row in rows if row.get("symbol")})
+                )
+            except Exception as error:
+                print(f"⚠️ 成分股日线宽度不可用，保留缓存: {error}")
+            if context.get("breadth"):
+                context["breadth"] = {
+                    **context["breadth"],
+                    "concentration": calculate_top10_proxy(rows),
+                    "constituent_history": "仅从功能启用日起逐日保存当时名单；不以当前名单回填历史",
+                }
         except Exception as error:
             print(f"⚠️ NASDAQ-100 市场广度不可用，使用缓存: {error}")
+    try:
+        benchmark = download_benchmark_history(
+            full=refresh_fred or not {"SP500", "NDXEqualWeight", "Russell2000", "QQQ"}.issubset(history.columns)
+        )
+        history = history.combine_first(benchmark)
+        history.update(benchmark)
+    except Exception as error:
+        print(f"⚠️ 相对强弱基准不可用，使用缓存: {error}")
     return history, context
 
 
@@ -810,6 +949,223 @@ def _forward_statistics(values: pd.Series) -> dict:
     }
 
 
+def _bounded(value: float, low: float = 0, high: float = 100) -> float:
+    return max(low, min(high, value))
+
+
+def build_relative_strength(data: pd.DataFrame, context_history: pd.DataFrame) -> dict:
+    aligned = context_history.reindex(data.index).ffill(limit=5)
+    windows = {"3个月": 63, "1年": 252, "3年": 756}
+    labels = {
+        "SP500": "标普500",
+        "NDXEqualWeight": "纳指100等权",
+        "Russell2000": "罗素2000",
+        "QQQ": "QQQ",
+    }
+    result = {"benchmarks": {}, "qqq_cash_excess_1y_pct": None}
+    ndx = data["Close"]
+    for column, label in labels.items():
+        benchmark = aligned.get(column, pd.Series(index=data.index, dtype=float))
+        common = pd.concat([ndx.rename("ndx"), benchmark.rename("benchmark")], axis=1).dropna()
+        values = {}
+        for window, sessions in windows.items():
+            sample = common.iloc[-sessions - 1 :]
+            values[window] = _round_optional(
+                ((sample.ndx.iloc[-1] / sample.ndx.iloc[0]) - (sample.benchmark.iloc[-1] / sample.benchmark.iloc[0])) * 100
+            ) if len(sample) > sessions else None
+        result["benchmarks"][column] = {"label": label, "excess_return_pct": values}
+    qqq = aligned.get("QQQ", pd.Series(index=data.index, dtype=float)).dropna()
+    bill = aligned.get("Treasury3M", pd.Series(index=data.index, dtype=float)).reindex(qqq.index).ffill()
+    if len(qqq) > 252 and bill.iloc[-252:].notna().any():
+        qqq_return = qqq.iloc[-1] / qqq.iloc[-253] - 1
+        cash_return = (1 + bill.iloc[-252:].ffill().mean() / 100) ** (252 / 252) - 1
+        result["qqq_cash_excess_1y_pct"] = _round_optional((qqq_return - cash_return) * 100)
+    result["method"] = (
+        "各资产同日收盘、同窗口总收益之差；QQQ/现金以13周国库券年化收益率近似；"
+        "Yahoo指数不可用时，标普500与罗素2000分别使用SPY、IWM价格型ETF代理"
+    )
+    return result
+
+
+def enrich_breadth_context(data: pd.DataFrame, history: pd.DataFrame, context: dict) -> None:
+    breadth = context.get("breadth")
+    if not breadth:
+        return
+    series = history.get("BreadthEMA200Pct", pd.Series(dtype=float)).dropna()
+    breadth["acceleration_5d_pct_points"] = _round_optional(
+        float(series.iloc[-1] - series.iloc[-6]) if len(series) >= 6 else None
+    )
+    breadth["price_breadth_divergence_20d"] = None
+    if len(series) >= 21 and len(data) >= 21:
+        breadth["price_breadth_divergence_20d"] = bool(
+            data["Close"].pct_change(20).iloc[-1] > 0 and series.diff(20).iloc[-1] < 0
+        )
+
+
+def calculate_risk_dashboard(data: pd.DataFrame) -> dict:
+    returns = data["Close"].pct_change().dropna()
+    sample = returns.iloc[-252:]
+    tail = sample[sample <= sample.quantile(0.05)]
+    downside = sample.clip(upper=0)
+    annual_return = sample.mean() * 252
+    downside_vol = downside.pow(2).mean() ** 0.5 * math.sqrt(252)
+    drawdown = data["Close"] / data["Close"].cummax() - 1
+    underwater = drawdown < 0
+    durations, current = [], 0
+    for value in underwater:
+        current = current + 1 if value else 0
+        durations.append(current)
+    recovery_lengths = []
+    start = None
+    for position, value in enumerate(underwater.to_numpy()):
+        if value and start is None:
+            start = position
+        elif not value and start is not None:
+            recovery_lengths.append(position - start)
+            start = None
+    return {
+        "window_sessions": len(sample),
+        "historical_var95_1d_pct": _round_optional(max(0, -float(sample.quantile(0.05)) * 100)),
+        "expected_shortfall95_1d_pct": _round_optional(max(0, -float(tail.mean()) * 100)),
+        "downside_volatility_pct": _round_optional(float(downside_vol * 100)),
+        "sortino_ratio": _round_optional(float(annual_return / downside_vol) if downside_vol > 0 else None),
+        "current_drawdown_duration_sessions": int(durations[-1]),
+        "max_drawdown_duration_sessions": int(max(durations)),
+        "median_recovery_sessions": _round_optional(float(np.median(recovery_lengths)) if recovery_lengths else None),
+        "method": "近252个交易日历史模拟 VaR/ES；无风险利率取0；回撤周期按收盘创新高重置",
+    }
+
+
+def calculate_walk_forward_validation(data: pd.DataFrame, cost_bps: float = 10) -> dict:
+    returns = data["Close"].pct_change().fillna(0)
+    regimes = regime_series(data)
+    exposure = regimes.map({"多头": 1.0, "修复": 0.5, "防御": 0.0}).fillna(0).shift(1).fillna(0)
+    turnover = exposure.diff().abs().fillna(exposure.abs())
+    strategy = exposure * returns - turnover * cost_bps / 10000
+    valid = regimes.ne("未知").shift(1, fill_value=False)
+    strategy, benchmark = strategy[valid], returns[valid]
+
+    def metrics(values: pd.Series) -> dict:
+        wealth = (1 + values).cumprod()
+        years = max(len(values) / 252, 1 / 252)
+        downside = values.clip(upper=0).pow(2).mean() ** 0.5 * math.sqrt(252)
+        annual = wealth.iloc[-1] ** (1 / years) - 1
+        return {
+            "cagr_pct": _round_optional(float(annual * 100)),
+            "annualized_volatility_pct": _round_optional(float(values.std() * math.sqrt(252) * 100)),
+            "sortino_ratio": _round_optional(float(annual / downside) if downside > 0 else None),
+            "max_drawdown_pct": _round_optional(float((wealth / wealth.cummax() - 1).min() * 100)),
+        }
+
+    episodes = []
+    active = exposure[valid] > 0
+    group = active.ne(active.shift()).cumsum()
+    for _, values in strategy[active].groupby(group[active]):
+        path = (1 + values).cumprod() - 1
+        episodes.append((float(path.min() * 100), float(path.max() * 100)))
+    yearly = []
+    for year, values in strategy.groupby(strategy.index.year):
+        yearly.append({
+            "year": int(year),
+            "strategy_return_pct": _round_optional(float(((1 + values).prod() - 1) * 100)),
+            "benchmark_return_pct": _round_optional(float(((1 + benchmark.loc[values.index]).prod() - 1) * 100)),
+        })
+    return {
+        "signal": "前一交易日多头/修复/防御对应下一日 100%/50%/0% 风险暴露",
+        "transaction_cost_bps": cost_bps,
+        "uses_future_data": False,
+        "strategy": metrics(strategy),
+        "buy_and_hold": metrics(benchmark),
+        "annual_turnover_pct": _round_optional(float(turnover[valid].mean() * 252 * 100)),
+        "position_changes": int((turnover[valid] > 0).sum()),
+        "median_mae_pct": _round_optional(float(np.median([item[0] for item in episodes])) if episodes else None),
+        "median_mfe_pct": _round_optional(float(np.median([item[1] for item in episodes])) if episodes else None),
+        "yearly": yearly,
+        "limitations": "收盘信号下一交易日生效；不含税费、滑点冲击和现金利息；用于验证规则稳定性而非业绩承诺",
+    }
+
+
+def calculate_stress_scenarios(close: pd.Series) -> list[dict]:
+    definitions = [
+        ("科技泡沫", "2000-03-10", "2002-10-09"),
+        ("全球金融危机", "2007-10-31", "2009-03-09"),
+        ("疫情冲击", "2020-02-19", "2020-03-23"),
+        ("2022加息周期", "2021-11-19", "2022-12-28"),
+    ]
+    scenarios = []
+    for name, start, trough_end in definitions:
+        sample = close.loc[start:trough_end]
+        if sample.empty:
+            continue
+        start_value = float(close.loc[:start].iloc[-1])
+        trough_date = sample.idxmin()
+        trough_value = float(sample.loc[trough_date])
+        future = close.loc[trough_date:]
+        recovered = future[future >= start_value]
+        recovery_date = recovered.index[0] if not recovered.empty else None
+        scenarios.append({
+            "name": name,
+            "start_date": pd.Timestamp(start).date().isoformat(),
+            "trough_date": trough_date.date().isoformat(),
+            "peak_to_trough_pct": _round_optional((trough_value / start_value - 1) * 100),
+            "worst_day_pct": _round_optional(float(sample.pct_change().min() * 100)),
+            "recovery_date": recovery_date.date().isoformat() if recovery_date is not None else None,
+            "recovery_sessions": int(close.loc[trough_date:recovery_date].size - 1) if recovery_date is not None else None,
+        })
+    return scenarios
+
+
+def build_data_quality(data: pd.DataFrame, context: dict) -> dict:
+    freshness_points = {"正常": 20, "延迟": 10, "严重过期": 0}.get(
+        build_freshness(data)["status"], 0
+    )
+    provisional_share = data["Is_Provisional"].astype(bool).mean()
+    authority_points = 20 * (1 - min(1, provisional_share * 20))
+    critical = ["Close", "EMA50", "EMA200", "RSI14", "Volatility20_Pct"]
+    completeness_points = float(data[critical].tail(252).notna().mean().mean() * 20)
+    context_items = [context.get(key) for key in ("vxn", "treasury10y", "breadth")]
+    context_points = sum(1 for item in context_items if item and item.get("freshness") != "过期") / 3 * 20
+    difference = (context.get("calibration") or {}).get("max_abs_diff_pct")
+    consistency_points = 20 if difference is None else 20 * (1 - min(1, difference / 1.0))
+    components = {
+        "行情新鲜度": freshness_points,
+        "权威来源": authority_points,
+        "关键字段完整性": completeness_points,
+        "环境数据覆盖": context_points,
+        "跨源一致性": consistency_points,
+    }
+    score = round(sum(components.values()), 1)
+    return {
+        "score": score,
+        "grade": "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D",
+        "components": {key: round(value, 1) for key, value in components.items()},
+        "warnings": [key for key, value in components.items() if value < 16],
+        "methodology_version": METHODOLOGY_VERSION,
+    }
+
+
+def build_composite_score(data: pd.DataFrame, context: dict, risk: dict) -> dict:
+    latest = data.iloc[-1]
+    breadth = context.get("breadth") or {}
+    vxn = (context.get("vxn") or {}).get("value")
+    trend = _bounded(50 + (25 if latest.Close > latest.EMA200 else -25) + (15 if latest.EMA50 > latest.EMA200 else -15) + latest.Distance_EMA200_Pct)
+    momentum = _bounded(50 + (latest.RSI14 - 50) * 0.6 + latest.ROC20_Pct * 1.5 + np.sign(latest.MACD_Histogram) * 10)
+    breadth_values = [breadth.get(key) for key in ("above_ema20_pct", "above_ema50_pct", "above_ema200_pct")]
+    breadth_score = float(np.mean([value for value in breadth_values if value is not None])) if any(value is not None for value in breadth_values) else 50
+    risk_score = _bounded(100 - latest.Volatility20_Pct * 1.5 + latest.Drawdown_Pct * 1.2 - max(0, (vxn or 20) - 20) * 1.5)
+    position = _bounded(100 - abs(latest.Robust_Log_Percentile - 50) * 2)
+    components = {"趋势": trend, "动量": momentum, "宽度": breadth_score, "风险": risk_score, "长期位置": position}
+    weights = {"趋势": 0.30, "动量": 0.20, "宽度": 0.20, "风险": 0.20, "长期位置": 0.10}
+    score = round(sum(components[key] * weights[key] for key in components), 1)
+    return {
+        "score": score,
+        "label": "强" if score >= 70 else "中性" if score >= 45 else "弱",
+        "components": {key: round(float(value), 1) for key, value in components.items()},
+        "weights": weights,
+        "interpretation": "市场健康度合成，不是买卖信号；高分表示趋势、动量、宽度与风险环境更一致",
+    }
+
+
 def env_float(name: str, default: float, *, minimum: float = 0, maximum: float = 100) -> float:
     raw = os.getenv(name)
     try:
@@ -873,6 +1229,7 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
         data[["Close", "Source", "Is_Provisional"]].to_csv(float_format="%.4f").encode()
     ).hexdigest()
 
+    risk_dashboard = calculate_risk_dashboard(data)
     snapshot = {
         "market_date": market_date.isoformat(),
         "close": round(float(latest["Close"]), 2),
@@ -900,6 +1257,9 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
         "volatility20_pct": _round_optional(float(latest["Volatility20_Pct"])),
         "drawdown_pct": round(float(latest["Drawdown_Pct"]), 2),
         "max_drawdown_pct": round(float(data["Drawdown_Pct"].min()), 2),
+        "risk_dashboard": risk_dashboard,
+        "walk_forward_validation": calculate_walk_forward_validation(data),
+        "stress_scenarios": calculate_stress_scenarios(close),
         "robust_log_trend": data.attrs["robust_log_trend"],
         "asof_robust_log_trend": data.attrs.get("asof_robust_log_trend"),
         "trend_model_stability": data.attrs.get("trend_model_stability"),
@@ -915,12 +1275,15 @@ def build_snapshot(data: pd.DataFrame, context: dict, freshness: dict) -> dict:
             "data_fingerprint_sha256": fingerprint,
         },
         "methodology": {
+            "version": METHODOLOGY_VERSION,
             "trend_model_version": TREND_MODEL_VERSION,
             "full_history_curve_is_descriptive": True,
             "asof_curve_uses_future_data": False,
             "asof_refit_cadence": "每月首个交易日使用截至上月末的数据重估",
         },
     }
+    snapshot["composite_score"] = build_composite_score(data, context, risk_dashboard)
+    snapshot["data_quality"] = build_data_quality(data, context)
     snapshot["alert"] = build_alert(snapshot)
     return snapshot
 
@@ -959,8 +1322,10 @@ def build_ai_request(snapshot: dict) -> tuple[str, dict, str, str]:
                 "role": "system",
                 "content": (
                     "你是一名审慎的市场数据分析员。只能使用用户提供的 NASDAQ-100 指标，不得虚构新闻、宏观事件或实时信息。"
-                    "只返回 JSON 对象，字段必须是 market_state、momentum_trend、risks、next_session_watch 和 facts。"
-                    "前四项是中文短段落；facts 是3至6项数组，每项仅含 metric 和 value。"
+                    "只返回 JSON 对象，字段必须是 market_state、momentum_trend、risks、next_session_watch、"
+                    "contradictions、invalidation_conditions、data_quality 和 facts。"
+                    "前四项与 data_quality 是中文短段落；contradictions 与 invalidation_conditions 各为1至3条中文短句数组；"
+                    "facts 是3至6项数组，每项仅含 metric 和 value。"
                     "JSON 格式示例：{\"market_state\":\"文字\",\"momentum_trend\":\"文字\",\"risks\":\"文字\","
                     "\"next_session_watch\":\"文字\",\"facts\":[{\"metric\":\"close\",\"value\":0}]}；"
                     "示例中的0必须替换为输入里的精确值，且 facts 必须扩展到3至6项。"
@@ -1048,10 +1413,47 @@ def parse_and_validate_ai_analysis(raw: str, snapshot: dict) -> str:
         if not math.isclose(value, allowed[metric], rel_tol=0, abs_tol=0.011):
             raise ValueError(f"AI 指标数值不一致: {metric}")
         checked.append(metric)
+    contradictions = result.get("contradictions") or ["未提供额外矛盾证据"]
+    invalidations = result.get("invalidation_conditions") or ["价格、宽度与风险指标出现反向变化时重新评估"]
+    if not isinstance(contradictions, list) or not isinstance(invalidations, list):
+        raise ValueError("AI 矛盾证据或失效条件格式无效")
     return "\n".join(
         [f"{label}：{str(result[key]).strip()}" for key, label in AI_SECTION_LABELS.items()]
-        + [f"事实校验：已核对 {len(checked)} 项结构化指标；仅供数据研究，不构成投资建议。"]
+        + [
+            f"矛盾证据：{'；'.join(map(str, contradictions[:3]))}",
+            f"失效条件：{'；'.join(map(str, invalidations[:3]))}",
+            f"数据质量：{str(result.get('data_quality') or snapshot.get('data_quality', {}).get('grade', '待评估')).strip()}",
+            f"事实校验：已核对 {len(checked)} 项结构化指标；仅供数据研究，不构成投资建议。",
+        ]
     )
+
+
+def build_analysis_framework(snapshot: dict) -> dict:
+    breadth = snapshot.get("context", {}).get("breadth") or {}
+    evidence = [
+        {"metric": "close_vs_ema200_pct", "value": snapshot.get("distance_ema200_pct"), "supports": "趋势"},
+        {"metric": "breadth_above_ema200_pct", "value": breadth.get("above_ema200_pct"), "supports": "宽度"},
+        {"metric": "volatility20_pct", "value": snapshot.get("volatility20_pct"), "supports": "风险"},
+        {"metric": "robust_deviation_pct", "value": snapshot.get("robust_log_trend", {}).get("deviation_pct"), "supports": "长期位置"},
+    ]
+    evidence = [item for item in evidence if item["value"] is not None]
+    contradictions = []
+    if snapshot.get("daily_return_pct", 0) > 0 and breadth.get("acceleration_5d_pct_points", 0) < 0:
+        contradictions.append("指数上涨但 EMA200 市场宽度五日变化转弱")
+    if snapshot.get("status") == "多头趋势" and snapshot.get("drawdown_pct", 0) < -10:
+        contradictions.append("长期均线仍偏多，但价格尚处于较深历史回撤")
+    if not contradictions:
+        contradictions.append("当前主要指标未出现显著方向冲突，仍需观察下一交易日确认")
+    return {
+        "evidence": evidence,
+        "contradictions": contradictions,
+        "invalidation_conditions": [
+            "收盘跌破 EMA200 且市场宽度同步恶化",
+            "VXN 与已实现波动同时显著上升",
+            "临时行情经 FRED 校准后改变关键阈值判断",
+        ],
+        "data_quality": snapshot.get("data_quality"),
+    }
 
 
 def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
@@ -1094,7 +1496,14 @@ def export_data(
     export.to_csv(WEB_CSV_PATH, encoding="utf-8-sig", float_format="%.4f")
     if not context_history.empty:
         context_history.index.name = "Date"
-        context_history.to_csv(CONTEXT_CSV_PATH, encoding="utf-8-sig", float_format="%.4f")
+        context_columns = [column for column in CONTEXT_COLUMNS if column in context_history]
+        benchmark_columns = [column for column in BENCHMARK_COLUMNS if column in context_history]
+        context_history[context_columns].dropna(how="all").to_csv(
+            CONTEXT_CSV_PATH, encoding="utf-8-sig", float_format="%.4f"
+        )
+        context_history[benchmark_columns].dropna(how="all").to_csv(
+            BENCHMARK_CSV_PATH, encoding="utf-8-sig", float_format="%.4f"
+        )
 
     columns = [
         "Close",
@@ -1210,6 +1619,11 @@ def export_data(
             "breadth_ema20_pct": _json_number(aligned.at[date, "BreadthEMA20Pct"]) if "BreadthEMA20Pct" in aligned else None,
             "breadth_ema50_pct": _json_number(aligned.at[date, "BreadthEMA50Pct"]) if "BreadthEMA50Pct" in aligned else None,
             "breadth_ema200_pct": _json_number(aligned.at[date, "BreadthEMA200Pct"]) if "BreadthEMA200Pct" in aligned else None,
+            "sp500": _json_number(aligned.at[date, "SP500"]) if "SP500" in aligned else None,
+            "ndx_equal_weight": _json_number(aligned.at[date, "NDXEqualWeight"]) if "NDXEqualWeight" in aligned else None,
+            "russell2000": _json_number(aligned.at[date, "Russell2000"]) if "Russell2000" in aligned else None,
+            "qqq": _json_number(aligned.at[date, "QQQ"]) if "QQQ" in aligned else None,
+            "treasury3m": _json_number(aligned.at[date, "Treasury3M"]) if "Treasury3M" in aligned else None,
             "breadth_divergence": bool(ndx_return20.loc[date] > 0 and breadth_change20.loc[date] < 0)
             if pd.notna(ndx_return20.loc[date]) and pd.notna(breadth_change20.loc[date])
             else None,
@@ -1352,6 +1766,8 @@ def job(
     context_history, context = build_market_context(refresh_fred=refresh_fred)
     context = annotate_context_freshness(context, latest_date)
     context_history = record_context_history(context_history, context)
+    enrich_breadth_context(data, context_history, context)
+    context["relative_strength"] = build_relative_strength(data, context_history)
     if data.attrs.get("calibration_audit"):
         context["calibration"] = data.attrs["calibration_audit"]
     snapshot = build_snapshot(data, context, freshness)
@@ -1366,8 +1782,8 @@ def job(
     reused_analysis = (
         not os.getenv("OPENAI_API_KEY")
         and previous_analysis.get("market_date") == snapshot["market_date"]
-        and previous_analysis.get("source") not in {"规则分析", "规则分析（AI 回退）"}
-        and previous_analysis.get("fact_validation") == "passed"
+        and bool(previous_analysis.get("text"))
+        and previous_analysis.get("fact_validation") in {"passed", "deterministic"}
     )
     if reused_analysis:
         text = previous_analysis["text"]
@@ -1385,6 +1801,7 @@ def job(
         "text": text,
         "fact_validation": "passed" if source not in {"规则分析", "规则分析（AI 回退）"} else "deterministic",
         "disclaimer": "仅供数据研究与市场观察，不构成投资建议。",
+        **build_analysis_framework(snapshot),
     }
     print(f"✅ 分析来源: {source}" + (f" ({model})" if model else ""))
     export_data(data, snapshot, analysis, context_history, context, regime_analysis)

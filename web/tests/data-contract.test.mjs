@@ -26,8 +26,21 @@ test("generated data satisfies the dashboard contract", async () => {
   assert.ok(market.series.slice(-252).every((point) => point.bollinger_lower > 0 && point.bollinger_upper > point.bollinger_lower));
   assert.ok(market.series.slice(-252).every((point) => Number.isFinite(point.macd) && Number.isFinite(point.macd_signal) && Number.isFinite(point.roc20_pct)));
   assert.match(market.summary.provenance.data_fingerprint_sha256, /^[a-f0-9]{64}$/);
+  assert.ok(market.summary.composite_score.score >= 0 && market.summary.composite_score.score <= 100);
+  assert.deepEqual(Object.keys(market.summary.composite_score.components), ["趋势", "动量", "宽度", "风险", "长期位置"]);
+  assert.ok(market.summary.risk_dashboard.expected_shortfall95_1d_pct >= market.summary.risk_dashboard.historical_var95_1d_pct);
+  assert.equal(market.summary.walk_forward_validation.uses_future_data, false);
+  assert.equal(market.summary.walk_forward_validation.transaction_cost_bps, 10);
+  assert.equal(market.summary.stress_scenarios.length, 4);
+  assert.ok(market.summary.data_quality.score >= 0 && market.summary.data_quality.score <= 100);
+  assert.match(market.summary.methodology.version, /^\d{4}-\d{2}-\d{2}/);
+  assert.ok(Object.keys(market.summary.context.relative_strength.benchmarks).length >= 4);
+  assert.ok(context.series.slice(-252).some((point) => point.sp500 && point.ndx_equal_weight && point.russell2000 && point.qqq));
   assert.equal(context.series.at(-1).date, market.latest_date);
   assert.equal(analysis.market_date, market.latest_date);
+  assert.ok(analysis.evidence.length >= 3);
+  assert.ok(analysis.contradictions.length >= 1);
+  assert.ok(analysis.invalidation_conditions.length >= 1);
 });
 
 test("sector monitor exports eight usable core benchmarks", async () => {

@@ -46,6 +46,11 @@ type Summary = {
   volatility20_pct: number;
   drawdown_pct: number;
   max_drawdown_pct: number;
+  composite_score: { score: number; label: string; components: Record<string, number>; weights: Record<string, number>; interpretation: string };
+  risk_dashboard: { window_sessions: number; historical_var95_1d_pct: number; expected_shortfall95_1d_pct: number; downside_volatility_pct: number; sortino_ratio: number; current_drawdown_duration_sessions: number; max_drawdown_duration_sessions: number; median_recovery_sessions: number; method: string };
+  walk_forward_validation: { signal: string; transaction_cost_bps: number; uses_future_data: boolean; strategy: Record<string, number>; buy_and_hold: Record<string, number>; annual_turnover_pct: number; position_changes: number; median_mae_pct: number; median_mfe_pct: number; yearly: Array<{ year: number; strategy_return_pct: number; benchmark_return_pct: number }>; limitations: string };
+  stress_scenarios: Array<{ name: string; start_date: string; trough_date: string; peak_to_trough_pct: number; worst_day_pct: number; recovery_date: string | null; recovery_sessions: number | null }>;
+  data_quality: { score: number; grade: string; components: Record<string, number>; warnings: string[]; methodology_version: string };
   robust_log_trend: {
     method: string;
     start_date: string;
@@ -94,11 +99,12 @@ type Summary = {
     provisional_rows: number;
     data_fingerprint_sha256: string;
   };
-  methodology: { trend_model_version: string; full_history_curve_is_descriptive: boolean; asof_curve_uses_future_data: boolean; asof_refit_cadence: string };
+  methodology: { version: string; trend_model_version: string; full_history_curve_is_descriptive: boolean; asof_curve_uses_future_data: boolean; asof_refit_cadence: string };
   context: {
     vxn: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
     treasury10y: { value: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
-    breadth: { above_ema20_pct?: number; above_ema50_pct?: number; above_ema200_pct: number; above_ema200_count: number | null; sample_size: number | null; new_high20_count?: number; new_low20_count?: number; as_of: string; source: string; freshness?: string; age_days?: number } | null;
+    breadth: { above_ema20_pct?: number; above_ema50_pct?: number; above_ema200_pct: number; above_ema200_count: number | null; sample_size: number | null; new_high20_count?: number; new_low20_count?: number; acceleration_5d_pct_points?: number | null; price_breadth_divergence_20d?: boolean | null; concentration?: { top10_market_cap_share_pct: number; top10_daily_contribution_proxy_pct: number; members: string[]; method: string }; constituent_history?: string; as_of: string; source: string; freshness?: string; age_days?: number } | null;
+    relative_strength: { benchmarks: Record<string, { label: string; excess_return_pct: Record<string, number | null> }>; qqq_cash_excess_1y_pct: number | null; method: string };
     calibration?: { checked_at: string; corrected_rows: number; pending_rows: number; max_abs_diff_pct: number | null; max_diff_date: string | null } | null;
   };
 };
@@ -119,7 +125,7 @@ type MarketData = {
   series: Point[];
 };
 
-type ContextPoint = { date: string; vxn: number | null; treasury10y: number | null; ndx_vxn_corr60: number | null; breadth_ema20_pct: number | null; breadth_ema50_pct: number | null; breadth_ema200_pct: number | null; breadth_divergence: boolean | null };
+type ContextPoint = { date: string; vxn: number | null; treasury10y: number | null; ndx_vxn_corr60: number | null; breadth_ema20_pct: number | null; breadth_ema50_pct: number | null; breadth_ema200_pct: number | null; breadth_divergence: boolean | null; sp500: number | null; ndx_equal_weight: number | null; russell2000: number | null; qqq: number | null; treasury3m: number | null };
 type ContextData = { series: ContextPoint[] };
 
 type Analysis = {
@@ -130,6 +136,10 @@ type Analysis = {
   text: string;
   fact_validation?: string;
   disclaimer: string;
+  evidence?: Array<{ metric: string; value: number; supports: string }>;
+  contradictions?: string[];
+  invalidation_conditions?: string[];
+  data_quality?: Summary["data_quality"];
 };
 
 type Health = { checked_at: string; data?: { status: string; market_date: string }; ai?: { status: string; source: string; model: string | null }; email?: { status: string; market_date: string }; calibration?: { checked_at: string } | null };
@@ -224,7 +234,7 @@ function priceDetails(point: Point, visibility: PriceVisibility) {
   return values.length ? values.join(" · ") : "未选择价格曲线";
 }
 
-function PriceChart({ points, logScale, visibility }: { points: Point[]; logScale: boolean; visibility: PriceVisibility }) {
+function PriceChart({ points, logScale, visibility, sharedDate, onHoverDate }: { points: Point[]; logScale: boolean; visibility: PriceVisibility; sharedDate?: string; onHoverDate?: (date: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hovered, setHovered] = useState<{ point: Point; x: number } | null>(null);
 
@@ -378,6 +388,11 @@ function PriceChart({ points, logScale, visibility }: { points: Point[]; logScal
     return () => observer.disconnect();
   }, [points, logScale, visibility]);
 
+  const sharedIndex = sharedDate ? points.findIndex((point) => point.date >= sharedDate) : -1;
+  const sharedPoint = sharedIndex >= 0 ? points[sharedIndex] : null;
+  const activePoint = hovered?.point ?? sharedPoint;
+  const sharedRatio = sharedIndex / Math.max(1, points.length - 1);
+  const activeX = hovered?.x ?? (sharedIndex >= 0 ? `calc(${58 - sharedRatio * 82}px + ${sharedRatio * 100}%)` : null);
   return (
     <div className="chart-wrap">
       <canvas
@@ -387,23 +402,25 @@ function PriceChart({ points, logScale, visibility }: { points: Point[]; logScal
         onMouseMove={(event) => {
           const bounds = event.currentTarget.getBoundingClientRect();
           const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left - 58) / Math.max(1, bounds.width - 82)));
-          setHovered({ point: points[Math.round(ratio * (points.length - 1))], x: event.clientX - bounds.left });
+          const point = points[Math.round(ratio * (points.length - 1))];
+          setHovered({ point, x: event.clientX - bounds.left });
+          onHoverDate?.(point.date);
         }}
       />
-      {hovered && <span className="chart-crosshair" style={{ left: hovered.x }} />}
+      {activeX != null && <span className="chart-crosshair" style={{ left: activeX }} />}
       <button className="chart-download" onClick={() => downloadCanvas(canvasRef.current, `ndx-price-${points.at(-1)?.date ?? "chart"}.png`)}>下载 PNG</button>
-      {hovered && (
+      {activePoint && (
         <div className="chart-tooltip" role="status">
-          <span>{hovered.point.date}</span>
-          <strong>{number(hovered.point.close)}</strong>
-          <small>{priceDetails(hovered.point, visibility)}</small>
+          <span>{activePoint.date}</span>
+          <strong>{number(activePoint.close)}</strong>
+          <small>{priceDetails(activePoint, visibility)}</small>
         </div>
       )}
     </div>
   );
 }
 
-function RobustTrendChart({ points, logScale, visibility }: { points: Point[]; logScale: boolean; visibility: TrendVisibility }) {
+function RobustTrendChart({ points, logScale, visibility, sharedDate, onHoverDate }: { points: Point[]; logScale: boolean; visibility: TrendVisibility; sharedDate?: string; onHoverDate?: (date: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hovered, setHovered] = useState<{ point: Point; x: number } | null>(null);
 
@@ -516,11 +533,17 @@ function RobustTrendChart({ points, logScale, visibility }: { points: Point[]; l
     return () => observer.disconnect();
   }, [points, logScale, visibility]);
 
+  const sharedIndex = sharedDate ? points.findIndex((point) => point.date >= sharedDate) : -1;
+  const sharedPoint = sharedIndex >= 0 ? points[sharedIndex] : null;
+  const activePoint = hovered?.point ?? sharedPoint;
+  const sharedRatio = sharedIndex / Math.max(1, points.length - 1);
+  const activeX = hovered?.x ?? (sharedIndex >= 0 ? `calc(${58 - sharedRatio * 82}px + ${sharedRatio * 100}%)` : null);
   return <div className="robust-chart-wrap"><canvas ref={canvasRef} aria-label="NASDAQ-100 全历史稳健增长趋势与实际收盘点位" onMouseLeave={() => setHovered(null)} onMouseMove={(event) => {
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left - 58) / Math.max(1, bounds.width - 82)));
-    setHovered({ point: points[Math.round(ratio * (points.length - 1))], x: event.clientX - bounds.left });
-  }} />{hovered && <span className="chart-crosshair" style={{ left: hovered.x }} />}<button className="chart-download" onClick={() => downloadCanvas(canvasRef.current, `ndx-robust-trend-${points.at(-1)?.date ?? "chart"}.png`)}>下载 PNG</button>{hovered && <div className="chart-tooltip" role="status"><span>{hovered.point.date}</span><strong>{number(hovered.point.close)}</strong><small>全历史 {number(hovered.point.robust_trend)} · 无未来数据 {number(hovered.point.asof_robust_trend)} · 第 {number(hovered.point.robust_percentile)} 百分位</small></div>}</div>;
+    const point = points[Math.round(ratio * (points.length - 1))];
+    setHovered({ point, x: event.clientX - bounds.left }); onHoverDate?.(point.date);
+  }} />{activeX != null && <span className="chart-crosshair" style={{ left: activeX }} />}<button className="chart-download" onClick={() => downloadCanvas(canvasRef.current, `ndx-robust-trend-${points.at(-1)?.date ?? "chart"}.png`)}>下载 PNG</button>{activePoint && <div className="chart-tooltip" role="status"><span>{activePoint.date}</span><strong>{number(activePoint.close)}</strong><small>全历史 {number(activePoint.robust_trend)} · 无未来数据 {number(activePoint.asof_robust_trend)} · 第 {number(activePoint.robust_percentile)} 百分位</small></div>}</div>;
 }
 
 function StabilityChart({ points }: { points: Array<{ date: string; annualized_growth_pct: number }> }) {
@@ -723,6 +746,61 @@ function ContextIndicatorChart({
   return <canvas className="indicator-canvas" ref={canvasRef} aria-label={label} />;
 }
 
+const benchmarkMeta = {
+  ndx: { label: "NASDAQ-100", color: "#22d3ee" },
+  sp500: { label: "标普500", color: "#a78bfa" },
+  ndx_equal_weight: { label: "纳指100等权", color: "#34d399" },
+  russell2000: { label: "罗素2000", color: "#f59e0b" },
+  qqq: { label: "QQQ", color: "#f472b6" },
+} as const;
+type BenchmarkKey = keyof typeof benchmarkMeta;
+
+function BenchmarkChart({ points, ndx, visibility }: { points: ContextPoint[]; ndx: Point[]; visibility: Record<BenchmarkKey, boolean> }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || points.length < 2) return;
+    const ndxByDate = new Map(ndx.map((point) => [point.date, point.close]));
+    const series = (Object.keys(benchmarkMeta) as BenchmarkKey[]).filter((key) => visibility[key]).map((key) => {
+      const values = points.map((point) => key === "ndx" ? ndxByDate.get(point.date) ?? null : point[key]);
+      const base = values.find((value): value is number => value != null && value > 0);
+      return { key, values: values.map((value) => value != null && base ? value / base * 100 : null) };
+    });
+    const draw = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(bounds.width * ratio));
+      canvas.height = Math.max(1, Math.floor(bounds.height * ratio));
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+      const values = series.flatMap((item) => item.values).filter((value): value is number => value != null);
+      if (!values.length) return;
+      const min = Math.min(...values), max = Math.max(...values), spread = max - min || 1;
+      const x = (index: number) => 44 + index / Math.max(1, points.length - 1) * (bounds.width - 56);
+      const y = (value: number) => 10 + (bounds.height - 34) * (1 - (value - min) / spread);
+      context.font = "10px ui-monospace, monospace";
+      context.strokeStyle = "rgba(148,163,184,.18)";
+      context.fillStyle = "#708099";
+      context.textAlign = "right";
+      for (let line = 0; line <= 3; line += 1) {
+        const value = min + spread * line / 3, py = y(value);
+        context.beginPath(); context.moveTo(44, py); context.lineTo(bounds.width - 12, py); context.stroke();
+        context.fillText(value.toFixed(0), 39, py + 3);
+      }
+      series.forEach(({ key, values: normalized }) => {
+        context.strokeStyle = benchmarkMeta[key].color; context.lineWidth = key === "ndx" ? 2 : 1.4; context.beginPath();
+        let started = false;
+        normalized.forEach((value, index) => { if (value == null) return; if (started) context.lineTo(x(index), y(value)); else context.moveTo(x(index), y(value)); started = true; });
+        context.stroke();
+      });
+    };
+    draw(); const observer = new ResizeObserver(draw); observer.observe(canvas); return () => observer.disconnect();
+  }, [points, ndx, visibility]);
+  return <canvas className="benchmark-canvas" ref={canvasRef} aria-label="NASDAQ-100 与主要基准按区间起点归一为100的相对强弱图" />;
+}
+
 function RegimeTimeline({ points }: { points: Point[] }) {
   const sampled = points.filter((_, index) => index % Math.max(1, Math.floor(points.length / 180)) === 0);
   return (
@@ -748,6 +826,11 @@ export default function Home() {
   const [priceVisibility, setPriceVisibility] = useState<PriceVisibility>(() => savedVisibility("priceLines", basicPriceVisibility));
   const [trendVisibility, setTrendVisibility] = useState<TrendVisibility>(() => savedVisibility("trendLines", { close: true, robust: true, asof: true, band: false }));
   const [riskVisibility, setRiskVisibility] = useState<RiskVisibility>(() => savedVisibility("riskIndicators", basicRiskVisibility));
+  const [benchmarkVisibility, setBenchmarkVisibility] = useState<Record<BenchmarkKey, boolean>>(() => savedVisibility("benchmarks", { ndx: true, sp500: true, ndx_equal_weight: true, russell2000: true, qqq: false }));
+  const [compareStart, setCompareStart] = useState("");
+  const [compareEnd, setCompareEnd] = useState("");
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [sharedDate, setSharedDate] = useState<string>();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -759,8 +842,9 @@ export default function Home() {
     query.set("priceLines", visibilityQuery(priceVisibility));
     query.set("trendLines", visibilityQuery(trendVisibility));
     query.set("riskIndicators", visibilityQuery(riskVisibility));
+    query.set("benchmarks", visibilityQuery(benchmarkVisibility));
     window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
-  }, [range, logScale, trendRange, trendLogScale, priceVisibility, trendVisibility, riskVisibility]);
+  }, [range, logScale, trendRange, trendLogScale, priceVisibility, trendVisibility, riskVisibility, benchmarkVisibility]);
 
   useEffect(() => {
     Promise.all([
@@ -822,6 +906,12 @@ export default function Home() {
     ["1990至今年化", summary.returns.since_1990_cagr],
   ] as const;
   const latestPoint = market.series.at(-1)!;
+  const comparisonStartDate = compareStart || market.series.at(-253)?.date || market.start_date;
+  const comparisonEndDate = compareEnd || market.latest_date;
+  const pointAt = (date: string) => market.series.findLast((point) => point.date <= date);
+  const comparisonStart = pointAt(comparisonStartDate);
+  const comparisonEnd = pointAt(comparisonEndDate);
+  const comparisonReturn = comparisonStart && comparisonEnd ? (comparisonEnd.close / comparisonStart.close - 1) * 100 : null;
 
   return (
     <main>
@@ -859,6 +949,13 @@ export default function Home() {
           <div><span>成分股站上 EMA200</span><strong>{summary.context.breadth ? `${number(summary.context.breadth.above_ema200_pct)}%` : "待首次成功计算"}</strong><small>{summary.context.breadth ? `${summary.context.breadth.above_ema200_count == null ? summary.context.breadth.source : `${summary.context.breadth.above_ema200_count}/${summary.context.breadth.sample_size}`} · ${summary.context.breadth.as_of} · ${summary.context.breadth.freshness ?? "—"}` : "Nasdaq 名单 + Yahoo 日线"}</small></div>
         </section>
 
+        <section className="professional-overview panel">
+          <div className="score-ring"><span>综合市场健康度</span><strong>{number(summary.composite_score.score)}</strong><small>{summary.composite_score.label} · 0–100</small></div>
+          <div className="score-components">{Object.entries(summary.composite_score.components).map(([label, value]) => <p key={label}><span>{label}</span><i><b style={{ width: `${value}%` }} /></i><strong>{number(value)}</strong></p>)}</div>
+          <div className="quality-card"><span>数据质量</span><strong>{summary.data_quality.grade} · {number(summary.data_quality.score)}</strong><small>{summary.data_quality.warnings.length ? `注意：${summary.data_quality.warnings.join("、")}` : "全部质量维度正常"}</small><button onClick={() => { navigator.clipboard.writeText(window.location.href); setLinkCopied(true); window.setTimeout(() => setLinkCopied(false), 1600); }}>{linkCopied ? "已复制" : "复制当前视图链接"}</button></div>
+          <p className="method-note">{summary.composite_score.interpretation}。权重：趋势30%、动量20%、宽度20%、风险20%、长期位置10%，每项明示、可复核。</p>
+        </section>
+
         <section className="chart-panel panel">
           <div className="section-head">
             <div><span className="eyebrow">PRICE STRUCTURE</span><h2>长期趋势与均线结构</h2></div>
@@ -884,7 +981,7 @@ export default function Home() {
             <button aria-pressed={priceVisibility.robust} onClick={() => setPriceVisibility((value) => ({ ...value, robust: !value.robust }))}><i className="robust-main-line" />稳健拟合</button>
             <button aria-pressed={priceVisibility.band} onClick={() => setPriceVisibility((value) => ({ ...value, band: !value.band }))}><i className="robust-band" />经验区间</button>
           </div>
-          <PriceChart points={visiblePoints} logScale={logScale} visibility={priceVisibility} />
+          <PriceChart points={visiblePoints} logScale={logScale} visibility={priceVisibility} sharedDate={sharedDate} onHoverDate={setSharedDate} />
           <div className="timeline-label"><span>防御</span><span>修复</span><span>多头</span></div>
           <RegimeTimeline points={visiblePoints} />
         </section>
@@ -913,7 +1010,7 @@ export default function Home() {
             <button aria-pressed={trendVisibility.asof} onClick={() => setTrendVisibility((value) => ({ ...value, asof: !value.asof }))}><i className="asof-line" />无未来数据拟合</button>
             <button aria-pressed={trendVisibility.band} onClick={() => setTrendVisibility((value) => ({ ...value, band: !value.band }))}><i className="robust-band" />经验区间</button>
           </div>
-          <RobustTrendChart points={visibleTrendPoints} logScale={trendLogScale} visibility={trendVisibility} />
+          <RobustTrendChart points={visibleTrendPoints} logScale={trendLogScale} visibility={trendVisibility} sharedDate={sharedDate} onHoverDate={setSharedDate} />
           <p className="method-note">紫色全历史拟合用于描述长期结构，会使用当前可得的全部数据；绿色虚线在每月首个交易日仅使用截至上月末的数据重估，可用于无前视偏差的历史观察。经验区间是历史残差中央 80%，不是预测区间。异常偏离会被自动降权（本次 {number(robustTrend.downweighted_pct)}% 样本）。</p>
           <div className="model-validity">
             <div><span className="eyebrow">MODEL VALIDITY</span><h3>长期斜率稳定性与参数不确定性</h3></div>
@@ -946,6 +1043,19 @@ export default function Home() {
           </div>
         </section>
 
+        <section className="professional-risk panel">
+          <div className="section-head"><div><span className="eyebrow">PROFESSIONAL RISK</span><h2>尾部风险与恢复能力</h2></div><span className="source-chip">近 {summary.risk_dashboard.window_sessions} 交易日</span></div>
+          <div className="risk-stat-grid">
+            <p><span>1日历史 VaR 95%</span><strong>{number(summary.risk_dashboard.historical_var95_1d_pct)}%</strong><small>约5%交易日损失可能更差</small></p>
+            <p><span>预期损失 ES 95%</span><strong>{number(summary.risk_dashboard.expected_shortfall95_1d_pct)}%</strong><small>最差5%交易日平均损失</small></p>
+            <p><span>下行波动率</span><strong>{number(summary.risk_dashboard.downside_volatility_pct)}%</strong><small>只计负收益的年化波动</small></p>
+            <p><span>Sortino</span><strong>{number(summary.risk_dashboard.sortino_ratio)}</strong><small>年化收益 / 下行波动</small></p>
+            <p><span>当前水下期</span><strong>{summary.risk_dashboard.current_drawdown_duration_sessions} 日</strong><small>从最近历史高点起</small></p>
+            <p><span>历史最长水下期</span><strong>{summary.risk_dashboard.max_drawdown_duration_sessions} 日</strong><small>中位恢复 {number(summary.risk_dashboard.median_recovery_sessions)} 日</small></p>
+          </div>
+          <p className="method-note">{summary.risk_dashboard.method}。VaR 不是最大可能损失，ES 用于补充观察尾部严重度。</p>
+        </section>
+
         <section className="context-history panel">
           <div className="section-head"><div><span className="eyebrow">MARKET CONTEXT</span><h2>市场环境历史联动</h2></div><span className="row-count">与所选价格区间同步</span></div>
           <div className="risk-grid">
@@ -958,8 +1068,17 @@ export default function Home() {
             <article><div><span>站上 EMA50</span><strong>{number(summary.context.breadth?.above_ema50_pct)}%</strong></div><ContextIndicatorChart points={visibleContext} field="breadth_ema50_pct" color="#a78bfa" label="成分股站上 EMA50 比例" reference={50} /></article>
             <article><div><span>站上 EMA200</span><strong>{number(summary.context.breadth?.above_ema200_pct)}%</strong></div><ContextIndicatorChart points={visibleContext} field="breadth_ema200_pct" color="#34d399" label="成分股站上 EMA200 比例" reference={50} /></article>
           </div>
-          <p className="method-note">市场宽度从本次升级起逐日积累；20 日创新高/新低：{summary.context.breadth?.new_high20_count ?? "—"} / {summary.context.breadth?.new_low20_count ?? "—"}。价格上涨而 EMA200 宽度走弱时标记为背离。</p>
+          <div className="breadth-detail"><p><span>20日新高 / 新低</span><strong>{summary.context.breadth?.new_high20_count ?? "—"} / {summary.context.breadth?.new_low20_count ?? "—"}</strong></p><p><span>EMA200宽度五日加速度</span><strong className={tone(summary.context.breadth?.acceleration_5d_pct_points)}>{signed(summary.context.breadth?.acceleration_5d_pct_points, "点")}</strong></p><p><span>价格/宽度20日背离</span><strong>{summary.context.breadth?.price_breadth_divergence_20d ? "是" : "否"}</strong></p><p><span>前十大市值占比代理</span><strong>{number(summary.context.breadth?.concentration?.top10_market_cap_share_pct)}%</strong><small>当日贡献代理 {signed(summary.context.breadth?.concentration?.top10_daily_contribution_proxy_pct)}</small></p></div>
+          <p className="method-note">市场宽度从功能启用日起按当时成分名单逐日积累，不用今天的成分股回填过去。前十大数据是当前普通市值权重代理，并非 Nasdaq 官方修正指数权重；因此只用于集中度观察。</p>
           <p className="method-note">相关性使用日收益与 VXN 日变化的 60 个交易日窗口；仅描述同期关系，不代表因果。</p>
+        </section>
+
+        <section className="relative-panel panel">
+          <div className="section-head"><div><span className="eyebrow">RELATIVE STRENGTH</span><h2>跨市场相对强弱</h2></div><span className="source-chip">区间起点 = 100</span></div>
+          <div className="indicator-picker">{(Object.keys(benchmarkMeta) as BenchmarkKey[]).map((key) => <button key={key} aria-pressed={benchmarkVisibility[key]} onClick={() => setBenchmarkVisibility((value) => ({ ...value, [key]: !value[key] }))}><i style={{ background: benchmarkMeta[key].color }} />{benchmarkMeta[key].label}</button>)}</div>
+          <BenchmarkChart points={visibleContext} ndx={visiblePoints} visibility={benchmarkVisibility} />
+          <div className="relative-cards">{Object.entries(summary.context.relative_strength.benchmarks).map(([key, item]) => <p key={key}><span>{item.label} · NDX超额</span><strong className={tone(item.excess_return_pct["1年"])}>{signed(item.excess_return_pct["1年"])}</strong><small>3个月 {signed(item.excess_return_pct["3个月"])} · 3年 {signed(item.excess_return_pct["3年"])}</small></p>)}<p><span>QQQ 相对现金</span><strong className={tone(summary.context.relative_strength.qqq_cash_excess_1y_pct)}>{signed(summary.context.relative_strength.qqq_cash_excess_1y_pct)}</strong><small>近1年 · 现金以13周国库券近似</small></p></div>
+          <p className="method-note">{summary.context.relative_strength.method}。等权指数相对市值加权指数可辅助观察上涨是否过度集中。</p>
         </section>
 
         <section className="regime-evidence panel">
@@ -978,9 +1097,29 @@ export default function Home() {
           <p className="method-note">采用互不重叠样本，95% 为分布无关的中位数区间；“超额”相对同期全市场持有基准。另按高波动/常规波动分组写入数据文件，均不含交易成本。</p>
         </section>
 
+        <section className="validation-panel panel">
+          <div className="section-head"><div><span className="eyebrow">WALK-FORWARD VALIDATION</span><h2>无前视偏差的规则验证</h2></div><span className="source-chip">单边换仓成本 {summary.walk_forward_validation.transaction_cost_bps} bp</span></div>
+          <div className="validation-grid"><article><h3>状态规则</h3><p>{summary.walk_forward_validation.signal}</p><small>{summary.walk_forward_validation.limitations}</small></article><article><h3>策略</h3><strong>{signed(summary.walk_forward_validation.strategy.cagr_pct)} CAGR</strong><p>波动 {number(summary.walk_forward_validation.strategy.annualized_volatility_pct)}% · 最大回撤 {signed(summary.walk_forward_validation.strategy.max_drawdown_pct)}</p></article><article><h3>买入持有</h3><strong>{signed(summary.walk_forward_validation.buy_and_hold.cagr_pct)} CAGR</strong><p>波动 {number(summary.walk_forward_validation.buy_and_hold.annualized_volatility_pct)}% · 最大回撤 {signed(summary.walk_forward_validation.buy_and_hold.max_drawdown_pct)}</p></article><article><h3>执行特征</h3><strong>{summary.walk_forward_validation.position_changes} 次切换</strong><p>年化换手 {number(summary.walk_forward_validation.annual_turnover_pct)}% · MAE/MFE {signed(summary.walk_forward_validation.median_mae_pct)} / {signed(summary.walk_forward_validation.median_mfe_pct)}</p></article></div>
+          <div className="yearly-strip">{summary.walk_forward_validation.yearly.slice(-10).map((item) => <span key={item.year}><small>{item.year}</small><b className={tone(item.strategy_return_pct)}>{signed(item.strategy_return_pct)}</b><i>{signed(item.benchmark_return_pct)}</i></span>)}</div>
+          <p className="method-note">每根K线只使用前一交易日已经知道的状态，避免同日收盘信号偷看未来。年度条形中粗体为规则策略，细体为买入持有。</p>
+        </section>
+
+        <section className="stress-panel panel">
+          <div className="section-head"><div><span className="eyebrow">STRESS LAB</span><h2>历史压力场景</h2></div><span className="source-chip">实际历史路径 · 非预测</span></div>
+          <div className="stress-grid">{summary.stress_scenarios.map((scenario) => <article key={scenario.name}><span>{scenario.name}</span><strong className="negative">{signed(scenario.peak_to_trough_pct)}</strong><p>{scenario.start_date} → {scenario.trough_date}</p><small>最差单日 {signed(scenario.worst_day_pct)} · {scenario.recovery_date ? `${scenario.recovery_sessions}个交易日恢复` : "尚未恢复"}</small></article>)}</div>
+          <p className="method-note">峰谷损失从场景起点收盘计算，恢复指重新达到场景起点收盘；历史情景不能覆盖未来所有风险。</p>
+        </section>
+
+        <section className="compare-panel panel">
+          <div className="section-head"><div><span className="eyebrow">DATE COMPARE</span><h2>两日期状态对照</h2></div><span className="source-chip">与图表使用同一历史序列</span></div>
+          <div className="compare-controls"><label>起点<input type="date" min={market.start_date} max={market.latest_date} value={comparisonStartDate} onChange={(event) => setCompareStart(event.target.value)} /></label><label>终点<input type="date" min={market.start_date} max={market.latest_date} value={comparisonEndDate} onChange={(event) => setCompareEnd(event.target.value)} /></label></div>
+          <div className="compare-grid"><p><span>区间收益</span><strong className={tone(comparisonReturn)}>{signed(comparisonReturn)}</strong></p><p><span>收盘</span><strong>{number(comparisonStart?.close)} → {number(comparisonEnd?.close)}</strong></p><p><span>距 EMA200</span><strong>{comparisonStart?.ema200 ? signed((comparisonStart.close / comparisonStart.ema200 - 1) * 100) : "—"} → {comparisonEnd?.ema200 ? signed((comparisonEnd.close / comparisonEnd.ema200 - 1) * 100) : "—"}</strong></p><p><span>回撤</span><strong>{signed(comparisonStart?.drawdown_pct)} → {signed(comparisonEnd?.drawdown_pct)}</strong></p><p><span>稳健趋势偏离</span><strong>{signed(comparisonStart?.robust_deviation_pct)} → {signed(comparisonEnd?.robust_deviation_pct)}</strong></p></div>
+        </section>
+
         <section className="audit-panel panel">
           <div><span className="eyebrow">DATA AUDIT</span><h2>权威数据校准</h2></div>
           {summary.context.calibration ? <div className="audit-grid"><p><span>本次校准行数</span><strong>{summary.context.calibration.corrected_rows}</strong></p><p><span>仍待权威发布</span><strong>{summary.context.calibration.pending_rows}</strong></p><p><span>最大临时偏差</span><strong>{summary.context.calibration.max_abs_diff_pct == null ? "—" : `${summary.context.calibration.max_abs_diff_pct.toFixed(4)}%`}</strong></p><p><span>最大偏差日期</span><strong>{summary.context.calibration.max_diff_date ?? "—"}</strong></p></div> : <p className="method-note">等待下一次周度 FRED 权威校准后生成差异审计。</p>}
+          <div className="quality-components">{Object.entries(summary.data_quality.components).map(([label, value]) => <p key={label}><span>{label}</span><strong>{number(value)} / 20</strong></p>)}</div>
         </section>
 
         <section className="returns panel">
@@ -994,6 +1133,7 @@ export default function Home() {
         <section className="ai-panel panel">
           <div className="section-head"><div><span className="eyebrow">AI RISK BRIEF</span><h2>结构化市场解读</h2></div><span className="source-chip">{analysis.source}{analysis.model ? ` · ${analysis.model}` : ""} · {analysis.fact_validation === "passed" ? "事实已校验 · " : "规则校验 · "}{new Date(analysis.generated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</span></div>
           <div className="ai-copy">{analysis.text}</div>
+          <div className="ai-framework"><article><span>可核验证据</span>{analysis.evidence?.map((item) => <p key={item.metric}><strong>{item.supports}</strong>{item.metric} = {number(item.value)}</p>)}</article><article><span>矛盾证据</span>{analysis.contradictions?.map((item) => <p key={item}>{item}</p>)}</article><article><span>结论失效条件</span>{analysis.invalidation_conditions?.map((item) => <p key={item}>{item}</p>)}</article></div>
           <p className="disclaimer">{analysis.disclaimer}</p>
           {analysisHistory.length > 1 && <details className="analysis-history"><summary>查看历史 AI 分析（{analysisHistory.length} 期）</summary>{analysisHistory.slice(0, -1).reverse().slice(0, 8).map((item) => <article key={item.market_date}><strong>{item.market_date} · {item.source}</strong><p>{item.text}</p></article>)}</details>}
         </section>
@@ -1019,6 +1159,9 @@ export default function Home() {
             <p><strong>趋势</strong><span>收盘价、EMA50 与 EMA200 的相对位置定义市场状态，不预测拐点。</span></p>
             <p><strong>风险</strong><span>20 日年化波动、历史高点回撤和 52 周价格位置共同描述风险环境。</span></p>
             <p><strong>AI 边界</strong><span>只解释已提供的价格、风险与市场环境指标，不抓取新闻，不输出绝对交易指令。</span></p>
+            <p><strong>版本</strong><span>方法 {summary.methodology.version} · 长期模型 {summary.methodology.trend_model_version}；口径变化随代码提交保留，可由数据指纹复核。</span></p>
+            <p><strong>无前视验证</strong><span>月度扩展趋势及状态策略只使用当时可得数据；全历史拟合仅描述当前结构。</span></p>
+            <p><strong>已知边界</strong><span>历史成分股不回填；前十大贡献为当前市值代理；Yahoo 最新行待 FRED 权威校准。</span></p>
           </div>
         </section>
       </div>
