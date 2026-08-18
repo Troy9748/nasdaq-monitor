@@ -1340,7 +1340,7 @@ def build_ai_request(snapshot: dict) -> tuple[str, dict, str, str]:
             },
             {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
         ],
-        "max_tokens": 2000,
+        "max_tokens": 8000,
         "stream": False,
         "response_format": {"type": "json_object"},
     }
@@ -1456,10 +1456,10 @@ def build_analysis_framework(snapshot: dict) -> dict:
     }
 
 
-def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
+def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None, str | None]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        return deterministic_analysis(snapshot), "规则分析", None
+        return deterministic_analysis(snapshot), "规则分析", None, None
 
     url, payload, model, provider = build_ai_request(snapshot)
     request = urllib.request.Request(
@@ -1469,16 +1469,27 @@ def request_ai_analysis(snapshot: dict) -> tuple[str, str, str | None]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            result = json.load(response)
-        raw = result["choices"][0]["message"]["content"].strip()
-        if not raw:
-            raise RuntimeError(f"{provider} 响应中没有文本内容")
-        text = parse_and_validate_ai_analysis(raw, snapshot)
-        return text, provider, model
+        empty_detail = ""
+        for attempt in range(2):
+            with urllib.request.urlopen(request, timeout=120) as response:
+                result = json.load(response)
+            choice = result["choices"][0]
+            message = choice["message"]
+            raw = (message.get("content") or "").strip()
+            if raw:
+                text = parse_and_validate_ai_analysis(raw, snapshot)
+                return text, provider, model, None
+            usage = result.get("usage") or {}
+            empty_detail = (
+                f"finish_reason={choice.get('finish_reason') or 'unknown'}, "
+                f"reasoning_chars={len(message.get('reasoning_content') or '')}, "
+                f"completion_tokens={usage.get('completion_tokens', 'unknown')}"
+            )
+            print(f"⚠️ {provider} 第 {attempt + 1} 次响应正文为空（{empty_detail}）")
+        raise RuntimeError(f"{provider} 连续两次响应正文为空（{empty_detail}）")
     except (OSError, urllib.error.HTTPError, ValueError, KeyError, RuntimeError) as error:
         print(f"⚠️ AI 分析不可用，改用规则分析: {error}")
-        return deterministic_analysis(snapshot), "规则分析（AI 回退）", model
+        return deterministic_analysis(snapshot), "规则分析（AI 回退）", model, str(error)[:300]
 
 
 def export_data(
@@ -1789,8 +1800,9 @@ def job(
         text = previous_analysis["text"]
         source = previous_analysis["source"]
         model = previous_analysis.get("model")
+        analysis_error = previous_analysis.get("error")
     else:
-        text, source, model = request_ai_analysis(snapshot)
+        text, source, model, analysis_error = request_ai_analysis(snapshot)
     analysis = {
         "market_date": snapshot["market_date"],
         "generated_at": previous_analysis["generated_at"]
@@ -1798,6 +1810,7 @@ def job(
         else datetime.now(ZoneInfo("UTC")).isoformat(),
         "source": source,
         "model": model,
+        "error": analysis_error,
         "text": text,
         "fact_validation": "passed" if source not in {"规则分析", "规则分析（AI 回退）"} else "deterministic",
         "disclaimer": "仅供数据研究与市场观察，不构成投资建议。",
@@ -1807,7 +1820,7 @@ def job(
     export_data(data, snapshot, analysis, context_history, context, regime_analysis)
     health_updates = {
         "data": {"status": freshness["status"], "market_date": snapshot["market_date"]},
-        "ai": {"status": "正常" if source not in {"规则分析", "规则分析（AI 回退）"} else "回退", "source": source, "model": model},
+        "ai": {"status": "正常" if source not in {"规则分析", "规则分析（AI 回退）"} else "回退", "source": source, "model": model, "error": analysis_error},
         "calibration": context.get("calibration"),
     }
     if send_mail:

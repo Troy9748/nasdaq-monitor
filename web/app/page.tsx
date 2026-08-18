@@ -133,6 +133,7 @@ type Analysis = {
   generated_at: string;
   source: string;
   model: string | null;
+  error?: string | null;
   text: string;
   fact_validation?: string;
   disclaimer: string;
@@ -142,7 +143,7 @@ type Analysis = {
   data_quality?: Summary["data_quality"];
 };
 
-type Health = { checked_at: string; data?: { status: string; market_date: string }; ai?: { status: string; source: string; model: string | null }; email?: { status: string; market_date: string }; calibration?: { checked_at: string } | null };
+type Health = { checked_at: string; data?: { status: string; market_date: string }; ai?: { status: string; source: string; model: string | null; error?: string | null }; email?: { status: string; market_date: string }; calibration?: { checked_at: string } | null };
 
 const ranges = { "1年": 252, "3年": 756, "5年": 1260, "10年": 2520, 全部: Infinity } as const;
 const marketEvents = [
@@ -1132,6 +1133,7 @@ export default function Home() {
 
         <section className="ai-panel panel">
           <div className="section-head"><div><span className="eyebrow">AI RISK BRIEF</span><h2>结构化市场解读</h2></div><span className="source-chip">{analysis.source}{analysis.model ? ` · ${analysis.model}` : ""} · {analysis.fact_validation === "passed" ? "事实已校验 · " : "规则校验 · "}{new Date(analysis.generated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</span></div>
+          {analysis.error && <p className="ai-error">DeepSeek 暂未生效：{analysis.error}</p>}
           <div className="ai-copy">{analysis.text}</div>
           <div className="ai-framework"><article><span>可核验证据</span>{analysis.evidence?.map((item) => <p key={item.metric}><strong>{item.supports}</strong>{item.metric} = {number(item.value)}</p>)}</article><article><span>矛盾证据</span>{analysis.contradictions?.map((item) => <p key={item}>{item}</p>)}</article><article><span>结论失效条件</span>{analysis.invalidation_conditions?.map((item) => <p key={item}>{item}</p>)}</article></div>
           <p className="disclaimer">{analysis.disclaimer}</p>
@@ -1140,7 +1142,7 @@ export default function Home() {
 
         <section className="health-panel panel">
           <div className="section-head"><div><span className="eyebrow">SYSTEM HEALTH</span><h2>自动化运行状态</h2></div><span className="source-chip">{health ? new Date(health.checked_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "—"}</span></div>
-          <div className="health-grid"><p><span>行情</span><strong>{health?.data?.status ?? "—"}</strong><small>{health?.data?.market_date ?? "—"}</small></p><p><span>AI</span><strong>{health?.ai?.status ?? "—"}</strong><small>{health?.ai?.source ?? "—"}</small></p><p><span>邮件</span><strong>{health?.email?.status ?? "—"}</strong><small>{health?.email?.market_date ?? "—"}</small></p><p><span>告警阈值</span><strong>VXN {summary.alert.thresholds.vxn} · 宽度 {summary.alert.thresholds.breadth}%</strong><small>波动 {summary.alert.thresholds.volatility}% · EMA ±{summary.alert.thresholds.ema_distance}%</small></p></div>
+          <div className="health-grid"><p><span>行情</span><strong>{health?.data?.status ?? "—"}</strong><small>{health?.data?.market_date ?? "—"}</small></p><p><span>AI</span><strong>{health?.ai?.status ?? "—"}</strong><small>{health?.ai?.error ?? health?.ai?.source ?? "—"}</small></p><p><span>邮件</span><strong>{health?.email?.status ?? "—"}</strong><small>{health?.email?.market_date ?? "—"}</small></p><p><span>告警阈值</span><strong>VXN {summary.alert.thresholds.vxn} · 宽度 {summary.alert.thresholds.breadth}%</strong><small>波动 {summary.alert.thresholds.volatility}% · EMA ±{summary.alert.thresholds.ema_distance}%</small></p></div>
         </section>
 
         <section className="table-panel panel">

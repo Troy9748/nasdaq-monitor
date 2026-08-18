@@ -1,3 +1,4 @@
+import io
 import json
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,7 @@ from monitor import (
     job,
     merge_recent_history,
     parse_and_validate_ai_analysis,
+    request_ai_analysis,
 )
 
 
@@ -140,7 +142,30 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["role"], "user")
         self.assertEqual(payload["thinking"], {"type": "enabled"})
         self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["max_tokens"], 8000)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+
+    @patch.dict(
+        "os.environ",
+        {"OPENAI_API_KEY": "test", "OPENAI_BASE_URL": "https://api.deepseek.com", "OPENAI_MODEL": "deepseek-v4-flash"},
+    )
+    @patch("monitor.urllib.request.urlopen")
+    def test_deepseek_retries_once_when_thinking_response_has_no_content(self, urlopen):
+        snapshot = {"close": 123.45, "daily_return_pct": 1.2, "ema200": 110.0}
+        valid = json.dumps({
+            "market_state": "状态。", "momentum_trend": "趋势。", "risks": "风险。", "next_session_watch": "观察。",
+            "facts": [{"metric": "close", "value": 123.45}, {"metric": "daily_return_pct", "value": 1.2}, {"metric": "ema200", "value": 110.0}],
+        }, ensure_ascii=False)
+        urlopen.side_effect = [
+            io.BytesIO(json.dumps({"choices": [{"message": {"content": "", "reasoning_content": "推理"}, "finish_reason": "length"}], "usage": {"completion_tokens": 2000}}).encode()),
+            io.BytesIO(json.dumps({"choices": [{"message": {"content": valid}, "finish_reason": "stop"}]}).encode()),
+        ]
+
+        text, source, model, error = request_ai_analysis(snapshot)
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual((source, model, error), ("DeepSeek", "deepseek-v4-flash", None))
+        self.assertIn("事实校验：已核对 3 项", text)
 
     def test_structured_ai_analysis_validates_fact_values(self):
         snapshot = {
@@ -308,7 +333,7 @@ class MonitorTest(unittest.TestCase):
     @patch("monitor.write_health")
     @patch("monitor.send_email")
     @patch("monitor.export_data")
-    @patch("monitor.request_ai_analysis", return_value=("analysis", "DeepSeek", "model"))
+    @patch("monitor.request_ai_analysis", return_value=("analysis", "DeepSeek", "model", None))
     @patch("monitor.build_market_context", return_value=(pd.DataFrame(), {}))
     @patch("monitor.download_history")
     @patch("monitor.previous_market_date")
@@ -330,7 +355,7 @@ class MonitorTest(unittest.TestCase):
     @patch("monitor.write_health")
     @patch("monitor.send_email")
     @patch("monitor.export_data")
-    @patch("monitor.request_ai_analysis", return_value=("analysis", "DeepSeek", "model"))
+    @patch("monitor.request_ai_analysis", return_value=("analysis", "DeepSeek", "model", None))
     @patch("monitor.build_market_context", return_value=(pd.DataFrame(), {}))
     @patch("monitor.download_history")
     @patch("monitor.previous_market_date")

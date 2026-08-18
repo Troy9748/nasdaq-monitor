@@ -38,6 +38,7 @@ test("generated data satisfies the dashboard contract", async () => {
   assert.ok(context.series.slice(-252).some((point) => point.sp500 && point.ndx_equal_weight && point.russell2000 && point.qqq));
   assert.equal(context.series.at(-1).date, market.latest_date);
   assert.equal(analysis.market_date, market.latest_date);
+  assert.ok(analysis.error == null || typeof analysis.error === "string");
   assert.ok(analysis.evidence.length >= 3);
   assert.ok(analysis.contradictions.length >= 1);
   assert.ok(analysis.invalidation_conditions.length >= 1);
